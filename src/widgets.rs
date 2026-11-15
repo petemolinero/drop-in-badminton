@@ -65,7 +65,11 @@ pub fn button(
     let pad = height * 0.36;
     let gap = height * 0.18;
     let icon_w = if icon.is_some() { icon_size + gap } else { 0.0 };
-    let width = (galley.size().x + icon_w + pad * 2.0).max(height * 2.0);
+    let mut width = (galley.size().x + icon_w + pad * 2.0).max(height * 2.0);
+    // In a justified layout the button fills the row.
+    if ui.layout().horizontal_justify() {
+        width = width.max(ui.available_width());
+    }
     let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click());
     let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
     if !ui.is_rect_visible(rect) {
@@ -74,9 +78,10 @@ pub fn button(
     let enabled = ui.is_enabled();
     let st = interaction(ui, &resp);
     let (fill, stroke, fg, icon_fg) = if !enabled {
-        let fill = if kind == ButtonKind::Subtle { Color32::TRANSPARENT } else { pal.bg_disabled };
+        // Visibly a button, just not ready yet.
+        let fill = if kind == ButtonKind::Subtle { Color32::TRANSPARENT } else { pal.subtle_selected };
         let stroke = if kind == ButtonKind::Subtle { Color32::TRANSPARENT } else { pal.stroke2 };
-        (fill, stroke, pal.fg_disabled, pal.fg_disabled)
+        (fill, stroke, pal.fg3, pal.fg3)
     } else {
         match kind {
             ButtonKind::Primary => {
@@ -194,6 +199,14 @@ pub fn hdivider(ui: &mut Ui, pal: &Palette) {
     );
 }
 
+/// A switch with "On" / "Off" beside it (for settings rows).
+pub fn switch_labeled(ui: &mut Ui, pal: &Palette, on: &mut bool) -> Response {
+    // Called in right-to-left rows: the label goes first so it ends up to the
+    // right of the switch, as Fluent places it.
+    ui.label(egui::RichText::new(if *on { "On" } else { "Off" }).font(regular(14.0)).color(pal.fg2));
+    switch(ui, pal, on)
+}
+
 /// Fluent switch (toggle).
 pub fn switch(ui: &mut Ui, pal: &Palette, on: &mut bool) -> Response {
     let size = vec2(44.0, 22.0);
@@ -253,75 +266,66 @@ pub fn stepper(ui: &mut Ui, pal: &Palette, value: &mut u32, min: u32, max: u32, 
     changed
 }
 
-/// A skill tag. Selected tags are filled in the skill style; others are
-/// outlined with a small mark. `compact` shows just a square badge.
+/// A skill tag: the skill badge and the level's name. Selected tags get the
+/// Fluent selected look. `compact` shows just the badge.
 pub fn skill_pill(ui: &mut Ui, pal: &Palette, skill: Skill, selected: bool, compact: bool) -> Response {
-    let style = theme::skill_style();
-    let font = semibold(13.0);
     if compact {
-        let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(vec2(badge_width(28.0), 28.0), Sense::click());
         let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
         let (h, _) = interaction(ui, &resp);
         let p = ui.painter();
-        paint_skill_fill(p, pal, rect, 4, skill, skill.rank() as usize);
+        paint_skill_badge(p, pal, rect, skill);
         if h > 0.0 {
-            p.rect_filled(rect, CornerRadius::same(4), Color32::from_black_alpha((h * 30.0) as u8));
-        }
-        if style == SkillStyle::Crowns {
-            paint_crown_grid(p, pal, rect, skill);
-        } else {
-            p.text(rect.center(), Align2::CENTER_CENTER, &skill.label()[..1], font, theme::on_skill_color(skill));
+            p.rect_filled(rect, CornerRadius::same(6), Color32::from_black_alpha((h * 30.0) as u8));
         }
         return resp.on_hover_text(format!("{} — click to change", skill.label()));
     }
-    let galley = ui.painter().layout_no_wrap(skill.label().to_owned(), font, Color32::WHITE);
-    let crowns = if style == SkillStyle::Crowns { crowns_width(ui.painter(), skill, 13.0) + 6.0 } else { 0.0 };
-    let dot = if selected || style == SkillStyle::Crowns { 0.0 } else { 12.0 };
-    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 18.0 + dot + crowns, 30.0), Sense::click());
+    let galley = ui.painter().layout_no_wrap(skill.label().to_owned(), semibold(13.0), Color32::WHITE);
+    let badge = badge_width(20.0);
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + badge + 22.0, 30.0), Sense::click());
     let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
     let st = interaction(ui, &resp);
     let p = ui.painter();
-    let text_x;
-    if style == SkillStyle::Crowns {
-        let fill = if selected { pal.subtle_selected } else { state_color(pal.bg1, pal.bg1_hover, pal.bg1_pressed, st) };
-        let stroke = if selected { pal.stroke_accessible } else { pal.stroke1 };
-        p.rect(rect, CornerRadius::same(4), fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
-        let w = crowns - 6.0;
-        paint_crowns(p, pal, pos2(rect.left() + 9.0 + w / 2.0, rect.center().y), skill, 13.0);
-        text_x = rect.left() + 9.0 + crowns;
-        p.galley_with_override_text_color(pos2(text_x, rect.center().y - galley.size().y / 2.0), galley, pal.fg1);
-    } else if selected {
-        paint_skill_fill(p, pal, rect, 4, skill, skill.rank() as usize);
-        p.galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, theme::on_skill_color(skill));
-    } else {
-        let fill = state_color(pal.bg1, pal.bg1_hover, pal.bg1_pressed, st);
-        p.rect(rect, CornerRadius::same(4), fill, Stroke::new(1.0, pal.stroke1), StrokeKind::Inside);
-        let dot_rect = Rect::from_center_size(pos2(rect.left() + 13.0, rect.center().y), vec2(9.0, 9.0));
-        p.circle_filled(dot_rect.center(), 4.5, theme::skill_color(skill));
-        p.galley_with_override_text_color(
-            pos2(rect.left() + 9.0 + dot, rect.center().y - galley.size().y / 2.0),
-            galley,
-            pal.fg1,
-        );
+    let fill = if selected { pal.subtle_selected } else { state_color(pal.bg1, pal.bg1_hover, pal.bg1_pressed, st) };
+    let stroke = if selected { Stroke::new(1.5, pal.brand_fg) } else { Stroke::new(1.0, pal.stroke1) };
+    p.rect(rect, CornerRadius::same(4), fill, stroke, StrokeKind::Inside);
+    let b = Rect::from_min_size(pos2(rect.left() + 7.0, rect.center().y - 10.0), vec2(badge, 20.0));
+    paint_skill_badge(p, pal, b, skill);
+    p.galley_with_override_text_color(pos2(b.right() + 7.0, rect.center().y - galley.size().y / 2.0), galley, pal.fg1);
+    resp
+}
+
+/// A fixed-width skill choice (for pickers laid out in a grid). The
+/// selected one is filled with the brand tint and ticked.
+pub fn skill_option(ui: &mut Ui, pal: &Palette, skill: Skill, selected: bool, width: f32) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 34.0), Sense::click());
+    let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
+    let st = interaction(ui, &resp);
+    let p = ui.painter();
+    let fill = if selected { pal.brand_subtle } else { state_color(pal.bg1, pal.bg1_hover, pal.bg1_pressed, st) };
+    let stroke = if selected { Stroke::new(1.5, pal.brand_fg) } else { Stroke::new(1.0, pal.stroke1) };
+    p.rect(rect, CornerRadius::same(4), fill, stroke, StrokeKind::Inside);
+    let b = Rect::from_min_size(pos2(rect.left() + 8.0, rect.center().y - 10.0), vec2(badge_width(20.0), 20.0));
+    paint_skill_badge(p, pal, b, skill);
+    let fg = if selected { pal.on_brand_subtle } else { pal.fg1 };
+    p.text(pos2(b.right() + 8.0, rect.center().y), Align2::LEFT_CENTER, skill.label(), if selected { semibold(14.0) } else { regular(14.0) }, fg);
+    if selected {
+        p.text(pos2(rect.right() - 12.0, rect.center().y), Align2::RIGHT_CENTER, theme::icon::CHECK, icon_font(16.0), pal.brand_fg);
     }
     resp
 }
 
-/// One to four crowns packed into a small square (2 × 2 at most).
-fn paint_crown_grid(painter: &egui::Painter, pal: &Palette, rect: Rect, skill: Skill) {
-    let n = theme::crown_count(skill);
-    let size = if n == 1 { 16.0 } else { 11.0 };
-    let c = rect.center();
-    let (dx, dy) = (5.5, 5.5);
-    let spots: &[Vec2] = match n {
-        1 => &[Vec2::ZERO],
-        2 => &[vec2(-dx, 0.0), vec2(dx, 0.0)],
-        3 => &[vec2(-dx, -dy), vec2(dx, -dy), vec2(0.0, dy)],
-        _ => &[vec2(-dx, -dy), vec2(dx, -dy), vec2(-dx, dy), vec2(dx, dy)],
-    };
-    for o in spots {
-        painter.text(c + *o, Align2::CENTER_CENTER, theme::icon::CROWN_F, icon_font(size), theme::crown_color(pal));
-    }
+/// How wide a skill tag of height `h` is (it holds a three-letter level).
+pub fn badge_width(h: f32) -> f32 {
+    (h * 1.9).round()
+}
+
+/// The skill tag used everywhere outside the player cards: a small rounded
+/// tag in the level's finish with its short name (BEG, INT, ADV, EXP).
+pub fn paint_skill_badge(painter: &egui::Painter, pal: &Palette, rect: Rect, skill: Skill) {
+    let radius = (rect.height() * 0.28).round() as u8;
+    paint_skill_fill(painter, pal, rect, radius, skill, skill.rank() as usize);
+    painter.text(rect.center(), Align2::CENTER_CENTER, skill.short(), theme::bold((rect.height() * 0.5).round()), theme::on_skill_color(skill));
 }
 
 /// Fit text into `max_width` by shrinking the font, returning the font size.
@@ -334,47 +338,6 @@ fn fit(painter: &egui::Painter, text: &str, family: fn(f32) -> egui::FontId, siz
     // Whole sizes only: every distinct size is rasterized into the font atlas,
     // so a width that changes every frame must not produce a new size each time.
     if w > max_width && w > 0.0 { (size * max_width / w).floor().max(8.0) } else { size }
-}
-
-/// A Fluent segmented control (tab-like buttons in a tray). Returns true when changed.
-pub fn segmented<T: Copy + PartialEq>(ui: &mut Ui, pal: &Palette, value: &mut T, options: &[T], label: fn(T) -> &'static str) -> bool {
-    let font = regular(14.0);
-    let galleys: Vec<_> = options.iter().map(|&o| ui.painter().layout_no_wrap(label(o).to_owned(), font.clone(), pal.fg1)).collect();
-    let widths: Vec<f32> = galleys.iter().map(|g| g.size().x + 24.0).collect();
-    let (tray, tray_resp) = ui.allocate_exact_size(vec2(widths.iter().sum::<f32>() + 4.0, 32.0), Sense::hover());
-    ui.painter().rect(tray, CornerRadius::same(4), pal.bg2, Stroke::new(1.0, pal.stroke2), StrokeKind::Inside);
-    let mut x = tray.left() + 2.0;
-    let mut changed = false;
-    for ((&option, galley), w) in options.iter().zip(galleys).zip(widths) {
-        let rect = Rect::from_min_size(pos2(x, tray.top() + 2.0), vec2(w, tray.height() - 4.0));
-        x += w;
-        let resp = ui.interact(rect, tray_resp.id.with(label(option)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
-        let on = *value == option;
-        let st = interaction(ui, &resp);
-        let p = ui.painter();
-        if on {
-            p.rect(rect, CornerRadius::same(3), pal.bg1, Stroke::new(1.0, pal.stroke1), StrokeKind::Inside);
-        } else if st.0 > 0.0 {
-            p.rect_filled(rect, CornerRadius::same(3), pal.subtle_hover.gamma_multiply(st.0));
-        }
-        let fg = if on { pal.fg1 } else { pal.fg2 };
-        p.galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, fg);
-        if on {
-            let bar = Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 2.0), vec2(14.0, 2.5));
-            p.rect_filled(bar, CornerRadius::same(1), pal.brand_fg);
-        }
-        if resp.clicked() && !on {
-            *value = option;
-            changed = true;
-        }
-    }
-    changed
-}
-
-/// A short vertical bar in a player's skill color, used to mark list rows.
-/// Crowns show nothing here.
-pub fn paint_skill_bar(painter: &egui::Painter, rect: Rect, skill: Skill) -> bool {
-    paint_skill_lead(painter, rect, skill)
 }
 
 /// Paint a player chip: a skill-colored card with the name.
@@ -390,9 +353,9 @@ pub fn paint_player_chip(
     lifted: f32,
     highlight: bool,
     detail: Option<&str>,
+    meta_cap: f32,
 ) {
-    let fg = skill_text_color(pal, skill);
-    let crowns = theme::skill_style() == SkillStyle::Crowns;
+    let fg = theme::on_skill_color(skill);
     let r = (rect.height() * 0.16).clamp(4.0, 10.0) as u8;
     elevate(painter, pal, rect, r, 2);
     if lifted > 0.0 {
@@ -403,60 +366,84 @@ pub fn paint_player_chip(
         }
     }
     paint_skill_fill(painter, pal, rect, r, skill, finish_variant(name));
-    // A white edge keeps chips distinct on the court.
-    if !crowns {
-        painter.rect_stroke(rect, CornerRadius::same(r), Stroke::new(2.0, Color32::from_white_alpha(225)), StrokeKind::Inside);
+    if rect.height() >= 30.0 {
+        // The level's short name on a little white tag at the left: a cue
+        // that doesn't rely on color.
+        let h = rect.height();
+        let tf = tag_font(h);
+        let tag = Rect::from_min_size(pos2(rect.left() + meter_left(h), rect.center().y - tf * 0.8), vec2(tf * 2.9, tf * 1.6));
+        let plate = if pal.dark { Color32::from_gray(200) } else { Color32::from_white_alpha(230) };
+        painter.rect_filled(tag, CornerRadius::same((tf * 0.4) as u8), plate);
+        painter.text(tag.center(), Align2::CENTER_CENTER, skill.short(), theme::bold(tf), theme::hex(0x1F2933));
     }
+    // A white edge keeps chips distinct on the court.
+    let edge = if pal.dark { Color32::from_white_alpha(70) } else { Color32::from_white_alpha(225) };
+    painter.rect_stroke(rect, CornerRadius::same(r), Stroke::new(2.0, edge), StrokeKind::Inside);
     if highlight {
         painter.rect_stroke(rect.expand(3.0), CornerRadius::same(r + 3), Stroke::new(3.0, pal.brand_fg), StrokeKind::Outside);
     }
-    let text_rect = rect.shrink2(vec2(rect.height() * 0.24, 0.0));
+    let (inset_l, inset_r) = chip_insets(rect.height());
+    let text_rect = Rect::from_min_max(pos2(rect.left() + inset_l, rect.top()), pos2(rect.right() - inset_r, rect.bottom()));
     let h = rect.height();
     match detail {
         // Two lines: the name, and a small line under it (e.g. time since playing).
         // Sizes are rounded so a chip in flight doesn't rasterize a new font size
         // every frame.
         Some(detail) if h >= 40.0 => {
-            // Crowns sit on their own line above the name.
-            let crown = if crowns { (h * 0.2).round().clamp(12.0, 22.0) } else { 0.0 };
-            let name_max = font_size.min((h * if crowns { 0.34 } else { 0.42 }).round());
+            let name_max = font_size.min((h * 0.42).round());
             let size = fit(painter, name, theme::semibold, name_max, text_rect.width());
-            let small = (h * 0.15).round().clamp(10.0, 14.0);
-            let small = fit(painter, detail, theme::regular, small, text_rect.width());
-            // Lay out both lines, then centre the pair vertically as one block.
-            let top_line = painter.layout_no_wrap(name.to_owned(), semibold(size), fg);
-            let sub_line = painter.layout_no_wrap(detail.to_owned(), regular(small), fg.gamma_multiply(0.85));
-            // Tuck the second line up under the name (line boxes have slack below the baseline).
-            let gap = -(size * 0.14).round();
-            let crown_h = if crowns { crown + (size * 0.05).round() } else { 0.0 };
-            let total = crown_h + top_line.size().y + gap + sub_line.size().y;
+            let small = (h * 0.15).round().clamp(11.0, 14.0).min(meta_cap);
+            // One format everywhere: it gets smaller before it ever gets cut.
+            let small = fit(painter, detail, theme::regular, small, text_rect.width()).max(9.0);
+            // Never wider than the card: ends in "…" rather than running under the badge.
+            let sub_line = elided(painter, detail, regular(small), fg, text_rect.width());
+            // A long name that would have to shrink a lot wraps onto two lines
+            // instead, when the card is tall enough.
+            let mut name_lines = vec![painter.layout_no_wrap(name.to_owned(), semibold(size), fg)];
+            let mut line_size = size;
+            // (A point or two short is just rounding — not worth a wrap.)
+            if h >= 56.0 && size < (name_max * 0.9).floor() {
+                if let Some((a, b)) = split_name(name) {
+                    let longer = if a.len() >= b.len() { a } else { b };
+                    // As close to the neighbours' size as the card allows.
+                    let mut s2 = fit(painter, longer, theme::semibold, name_max, text_rect.width());
+                    loop {
+                        let la = painter.layout_no_wrap(a.to_owned(), semibold(s2), fg);
+                        let lb = painter.layout_no_wrap(b.to_owned(), semibold(s2), fg);
+                        let block = la.size().y + lb.size().y - s2 * 0.3 + sub_line.size().y;
+                        if block <= h * 0.94 {
+                            if s2 >= size {
+                                name_lines = vec![la, lb];
+                                line_size = s2;
+                            }
+                            break;
+                        }
+                        s2 -= 1.0;
+                        if s2 < size {
+                            break;
+                        }
+                    }
+                }
+            }
+            let size = line_size;
+            // Tuck lines up under each other (line boxes have slack below the baseline).
+            let gap = -(size * 0.06).round();
+            let tuck = -(size * 0.15).round();
+            let names_h: f32 = name_lines.iter().map(|g| g.size().y).sum::<f32>() + tuck * (name_lines.len() as f32 - 1.0);
+            let total = names_h + gap + sub_line.size().y;
             // Line boxes carry space above the capitals and below the baseline;
             // nudge up so the visible ink is what's centred.
             let mut y = (rect.center().y - total / 2.0 - size * 0.1).round();
             let cx = text_rect.center().x;
-            if crowns {
-                paint_crowns(painter, pal, pos2(cx, y + crown / 2.0 + size * 0.1), skill, crown);
-                y += crown_h;
+            for g in name_lines {
+                let pos = pos2(cx - g.size().x / 2.0, y);
+                y += g.size().y + tuck;
+                text_shadow(painter, fg, pos, &g);
+                painter.galley(pos, g, fg);
             }
-            let sub_y = y + top_line.size().y + gap;
-            let name_pos = pos2(cx - top_line.size().x / 2.0, y);
-            let sub_pos = pos2(cx - sub_line.size().x / 2.0, sub_y);
-            text_shadow(painter, fg, name_pos, &top_line);
+            let sub_pos = pos2(cx - sub_line.size().x / 2.0, y - tuck + gap);
             text_shadow(painter, fg, sub_pos, &sub_line);
-            painter.galley(name_pos, top_line, fg);
             painter.galley(sub_pos, sub_line, fg);
-        }
-        _ if crowns => {
-            // Name with its crowns after it, centred together.
-            let crown = (font_size * 0.7).round();
-            let cw = crowns_width(painter, skill, crown) + crown * 0.4;
-            let size = fit(painter, name, theme::semibold, font_size, text_rect.width() - cw);
-            let line = painter.layout_no_wrap(name.to_owned(), semibold(size), fg);
-            let left = text_rect.center().x - (line.size().x + cw) / 2.0;
-            let top = text_rect.center().y - line.size().y / 2.0;
-            let name_w = line.size().x;
-            painter.galley(pos2(left, top), line, fg);
-            paint_crowns(painter, pal, pos2(left + name_w + cw / 2.0 + crown * 0.2, text_rect.center().y), skill, crown);
         }
         _ => {
             let size = fit(painter, name, theme::semibold, font_size, text_rect.width());
@@ -471,9 +458,136 @@ pub fn paint_player_chip(
 /// A faint light edge under dark text on a colored chip, as if pressed into
 /// the finish.
 fn text_shadow(painter: &egui::Painter, fg: Color32, pos: Pos2, galley: &std::sync::Arc<egui::Galley>) {
-    if theme::skill_style() == SkillStyle::Colors && fg.r() < 100 && fg.g() < 100 && fg.b() < 100 {
+    if fg.r() < 100 && fg.g() < 100 && fg.b() < 100 {
         painter.galley_with_override_text_color(pos + vec2(0.0, 1.0), galley.clone(), Color32::from_white_alpha(70));
     }
+}
+
+/// Text size of the level tag on a card of height `h`.
+fn tag_font(h: f32) -> f32 {
+    (h * 0.17).clamp(10.0, 15.0).round()
+}
+
+fn meter_left(h: f32) -> f32 {
+    (h * 0.12).max(9.0)
+}
+
+/// Room kept clear (left, right) of a chip's text: the level mark is pinned
+/// on the left and the name is centred in what's left.
+fn chip_insets(h: f32) -> (f32, f32) {
+    let mark = if h >= 30.0 { meter_left(h) + tag_font(h) * 2.9 + 8.0 } else { 0.0 };
+    let edge = (h * 0.16).max(8.0);
+    (edge.max(mark), edge)
+}
+
+
+/// The size a chip of `size` would draw `name` at (see `paint_player_chip`).
+pub fn chip_name_size(painter: &egui::Painter, size: Vec2, name: &str, font_size: f32, two_lines: bool) -> f32 {
+    let h = size.y;
+    let (l, r) = chip_insets(h);
+    let width = size.x - l - r;
+    let max = if two_lines && h >= 40.0 { font_size.min((h * 0.42).round()) } else { font_size };
+    fit(painter, name, theme::semibold, max, width)
+}
+
+/// The sub-line size a chip of height `h` and text width would use for `detail`.
+pub fn chip_meta_size(painter: &egui::Painter, size: Vec2, detail: &str) -> f32 {
+    let h = size.y;
+    let (l, r) = chip_insets(h);
+    let small = (h * 0.15).round().clamp(11.0, 14.0);
+    fit(painter, detail, theme::regular, small, size.x - l - r).max(9.0)
+}
+
+/// One name size for a group of chips, so a card doesn't mix huge and tiny
+/// names. Very long names still shrink further on their own.
+pub fn group_name_size(painter: &egui::Painter, size: Vec2, names: &[String], font_size: f32, two_lines: bool) -> f32 {
+    // Everyone shares the smallest size among ordinary-length names; a really
+    // long name (say "Bilbo Baggins of the Ford") wraps onto two lines at that
+    // size instead of dragging everyone down.
+    let ordinary = names
+        .iter()
+        .filter(|n| n.chars().count() <= 18)
+        .map(|n| chip_name_size(painter, size, n, font_size, two_lines))
+        .fold(f32::MAX, f32::min);
+    if ordinary == f32::MAX { font_size } else { ordinary }
+}
+
+/// A shuttlecock seen from above: cork, feather skirt with its quills and two
+/// bands, and a soft shadow. `angle` is the way the skirt points.
+pub fn paint_shuttle(painter: &egui::Painter, c: Pos2, size: f32, angle: f32, dark: bool) {
+    let d = Vec2::angled(angle);
+    let n = d.rot90();
+    let shade = if dark { 0.75 } else { 1.0 };
+    let white = Color32::from_gray((250.0 * shade) as u8);
+    let quill = Color32::from_gray((190.0 * shade) as u8);
+    let at = |along: f32, across: f32| c + d * (along * size) + n * (across * size);
+    // Shadow, offset as if lit from the top left.
+    let sh = vec2(size * 0.12, size * 0.16);
+    let skirt = |o: Vec2| vec![at(0.12, -0.2) + o, at(0.12, 0.2) + o, at(0.95, 0.46) + o, at(0.95, -0.46) + o];
+    painter.add(egui::Shape::convex_polygon(skirt(sh), Color32::from_black_alpha(45), Stroke::NONE));
+    painter.circle_filled(at(0.0, 0.0) + sh, size * 0.2, Color32::from_black_alpha(45));
+    // Skirt and quills.
+    painter.add(egui::Shape::convex_polygon(skirt(Vec2::ZERO), white, Stroke::new(1.0, quill)));
+    for k in 0..7 {
+        let t = k as f32 / 6.0 - 0.5;
+        painter.line_segment([at(0.14, t * 0.38), at(0.95, t * 0.9)], Stroke::new(0.8, quill));
+    }
+    for along in [0.42, 0.62] {
+        let w = 0.2 + (along - 0.12) / 0.83 * 0.26;
+        painter.line_segment([at(along, -w), at(along, w)], Stroke::new(1.2, quill));
+    }
+    // Cork, with a little shading.
+    painter.circle_filled(at(0.0, 0.0), size * 0.2, Color32::from_rgb((236.0 * shade) as u8, (226.0 * shade) as u8, (206.0 * shade) as u8));
+    painter.circle_filled(at(-0.05, -0.05), size * 0.09, Color32::from_white_alpha(120));
+    painter.circle_stroke(at(0.0, 0.0), size * 0.2, Stroke::new(1.0, quill));
+}
+
+/// A tilted rubber-stamp label, e.g. "TIME!" across a court.
+pub fn paint_stamp(painter: &egui::Painter, c: Pos2, text: &str, size: f32, angle: f32, fill: Color32, fg: Color32) {
+    let galley = painter.layout_no_wrap(text.to_owned(), theme::bold(size), fg);
+    let half = vec2(galley.size().x / 2.0 + size * 0.6, galley.size().y / 2.0 + size * 0.22);
+    let rot = egui::emath::Rot2::from_angle(angle);
+    let corners = [vec2(-half.x, -half.y), vec2(half.x, -half.y), vec2(half.x, half.y), vec2(-half.x, half.y)];
+    let shadow: Vec<Pos2> = corners.iter().map(|v| c + rot * *v + vec2(0.0, 3.0)).collect();
+    painter.add(egui::Shape::convex_polygon(shadow, Color32::from_black_alpha(60), Stroke::NONE));
+    let pts: Vec<Pos2> = corners.iter().map(|v| c + rot * *v).collect();
+    painter.add(egui::Shape::convex_polygon(pts, fill, Stroke::new(2.0, Color32::from_white_alpha(230))));
+    // Text, rotated about its own centre.
+    let offset = rot * (-galley.size() / 2.0);
+    painter.add(egui::epaint::TextShape::new(c + offset, galley, fg).with_angle(angle));
+}
+
+/// "Court [3]": the word, then a numbered tile like a court sign. The tile is
+/// filled for courts and outlined for their Up next group. Returns the rect.
+pub fn court_title(painter: &egui::Painter, pal: &Palette, left_center: Pos2, number: usize, size: f32, filled: bool) -> Rect {
+    let side = (size * 1.35).round();
+    // "Court" first, then the number tile: it reads like the sign on a hall wall.
+    let word = painter.text(left_center, Align2::LEFT_CENTER, "Court", semibold(size), pal.fg1);
+    let tile = Rect::from_min_size(pos2(word.right() + size * 0.4, left_center.y - side / 2.0), Vec2::splat(side));
+    if filled {
+        painter.rect_filled(tile, CornerRadius::same((side * 0.22) as u8), pal.brand);
+        painter.text(tile.center(), Align2::CENTER_CENTER, number.to_string(), theme::bold(size * 0.9), pal.on_brand);
+    } else {
+        painter.rect(tile, CornerRadius::same((side * 0.22) as u8), pal.brand_subtle, Stroke::new(1.0, pal.brand_fg.gamma_multiply(0.5)), StrokeKind::Inside);
+        painter.text(tile.center(), Align2::CENTER_CENTER, number.to_string(), theme::bold(size * 0.9), pal.on_brand_subtle);
+    }
+    tile.union(word)
+}
+
+/// A round "VS" medallion, for the line between two teams.
+pub fn paint_vs(painter: &egui::Painter, pal: &Palette, c: Pos2, r: f32) {
+    let (fill, ink) = if pal.dark { (pal.bg1, pal.fg1) } else { (Color32::WHITE, theme::hex(0x1C3D5A)) };
+    painter.circle_filled(c + vec2(0.0, 1.0), r + 1.0, Color32::from_black_alpha(40));
+    painter.circle_filled(c, r, fill);
+    painter.circle_stroke(c, r, Stroke::new(1.5, ink));
+    painter.text(c, Align2::CENTER_CENTER, "VS", theme::bold(r * 0.78), ink);
+}
+
+/// Split a name at the space nearest its middle.
+fn split_name(name: &str) -> Option<(&str, &str)> {
+    let mid = name.len() / 2;
+    let at = name.match_indices(' ').map(|(i, _)| i).min_by_key(|&i| i.abs_diff(mid))?;
+    Some((&name[..at], &name[at + 1..]))
 }
 
 /// Points around a rounded rectangle, clockwise from the top-left corner.
@@ -496,10 +610,15 @@ fn rounded_outline(rect: Rect, r: f32) -> Vec<Pos2> {
     pts
 }
 
-/// An empty slot: a dashed rounded outline with a label.
-pub fn paint_empty_slot(painter: &egui::Painter, pal: &Palette, rect: Rect, color: Color32, label: &str, font_size: f32, hot: bool) {
+/// An empty slot: a dashed rounded outline with a label. `glass` lays a
+/// smoky pane behind it so court lines don't run through the label.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_empty_slot(painter: &egui::Painter, pal: &Palette, rect: Rect, color: Color32, label: &str, font_size: f32, hot: bool, glass: bool) {
     let r = (rect.height() * 0.16).clamp(4.0, 10.0);
     let color = if hot { pal.brand_fg } else { color };
+    if glass {
+        painter.rect_filled(rect, CornerRadius::same(r as u8), Color32::from_rgba_unmultiplied(8, 22, 40, 150));
+    }
     if hot {
         painter.rect_filled(rect, CornerRadius::same(r as u8), pal.brand_fg.gamma_multiply(0.16));
     }
@@ -536,42 +655,109 @@ pub fn paint_badge(
 }
 
 /// Lay out a help paragraph for a section at the given width.
-pub fn help_galley(painter: &egui::Painter, pal: &Palette, text: &str, width: f32) -> std::sync::Arc<egui::Galley> {
-    let wrap = (width - HELP_PAD * 2.0 - HELP_ICON).max(60.0);
-    painter.layout(text.to_owned(), regular(14.0), pal.fg1, wrap)
+/// Help content: a one-line title and a few short bullets.
+pub struct Help {
+    pub title: String,
+    pub bullets: Vec<String>,
+}
+
+impl Help {
+    pub fn new(title: impl Into<String>, bullets: &[&str]) -> Self {
+        Self { title: title.into(), bullets: bullets.iter().map(|b| (*b).to_owned()).collect() }
+    }
 }
 
 const HELP_PAD: f32 = 12.0;
-const HELP_ICON: f32 = 28.0;
+const HELP_ICON: f32 = 30.0;
+/// Columns never get wider than this, so lines stay easy to read.
+const HELP_COL_MAX: f32 = 520.0;
 
-/// Height of a help bar holding `galley`.
-pub fn help_height(galley: &egui::Galley) -> f32 {
-    galley.size().y + HELP_PAD * 2.0 - 2.0
+/// A laid-out help callout, ready to paint.
+pub struct HelpLayout {
+    title: std::sync::Arc<egui::Galley>,
+    /// Each column's bullets, laid out separately for a hanging indent.
+    columns: Vec<Vec<std::sync::Arc<egui::Galley>>>,
+    col_w: f32,
+    pub height: f32,
 }
 
-/// Paint a Fluent info message bar: tinted card, info icon, wrapped text.
-pub fn paint_help(painter: &egui::Painter, pal: &Palette, rect: Rect, galley: std::sync::Arc<egui::Galley>) {
-    painter.rect(rect, CornerRadius::same(6), pal.brand_subtle, Stroke::new(1.0, pal.brand_fg.gamma_multiply(0.35)), StrokeKind::Inside);
+const BULLET_INDENT: f32 = 14.0;
+const BULLET_GAP: f32 = 5.0;
+
+/// Lay out `help` for a callout `width` wide: bullets flow into as many
+/// readable-width columns as fit (up to three).
+pub fn help_layout(painter: &egui::Painter, pal: &Palette, help: &Help, width: f32) -> HelpLayout {
+    let inner = (width - HELP_PAD * 2.0 - HELP_ICON).max(60.0);
+    let gap = 28.0;
+    // The column grid depends only on the width, so callouts side by side line up.
+    let ncols = (((inner + gap) / (HELP_COL_MAX * 0.75 + gap)).floor() as usize).clamp(1, 3);
+    let col_w = ((inner - gap * (ncols as f32 - 1.0)) / ncols as f32).min(HELP_COL_MAX);
+    let n = help.bullets.len();
+    let mut columns: Vec<Vec<_>> = Vec::new();
+    let mut start = 0;
+    for c in 0..ncols {
+        // Spread bullets as evenly as possible, earlier columns first.
+        let take = n / ncols + usize::from(c < n % ncols);
+        columns.push(
+            help.bullets[start..start + take]
+                .iter()
+                .map(|b| painter.layout(b.clone(), regular(14.0), pal.fg1, col_w - BULLET_INDENT))
+                .collect(),
+        );
+        start += take;
+    }
+    let title = painter.layout_no_wrap(help.title.clone(), semibold(15.0), pal.fg1);
+    let body_h = columns
+        .iter()
+        .map(|col| col.iter().map(|g| g.size().y + BULLET_GAP).sum::<f32>() - BULLET_GAP)
+        .fold(0.0, f32::max);
+    HelpLayout { height: HELP_PAD * 2.0 + title.size().y + 6.0 + body_h, title, columns, col_w }
+}
+
+/// Paint a Fluent info message bar: tinted card, help icon, title, bullets.
+pub fn paint_help(painter: &egui::Painter, pal: &Palette, rect: Rect, layout: HelpLayout) {
+    painter.rect(rect, CornerRadius::same(8), pal.brand_subtle, Stroke::new(1.0, pal.brand_fg.gamma_multiply(0.35)), StrokeKind::Inside);
+    let x0 = rect.left() + HELP_PAD + HELP_ICON;
+    let y0 = rect.top() + HELP_PAD;
     painter.text(
-        pos2(rect.left() + HELP_PAD + 9.0, rect.top() + HELP_PAD + 9.0),
+        pos2(rect.left() + HELP_PAD + 10.0, y0 + layout.title.size().y / 2.0),
         Align2::CENTER_CENTER,
         theme::icon::QUESTION_F,
         icon_font(20.0),
         pal.brand_fg,
     );
-    painter.galley(pos2(rect.left() + HELP_PAD + HELP_ICON, rect.top() + HELP_PAD - 1.0), galley, pal.fg1);
+    let body_y = y0 + layout.title.size().y + 6.0;
+    painter.galley(pos2(x0, y0), layout.title, pal.fg1);
+    for (i, col) in layout.columns.into_iter().enumerate() {
+        let x = x0 + i as f32 * (layout.col_w + 28.0);
+        let mut y = body_y;
+        for g in col {
+            let row_h = g.rows.first().map_or(g.size().y, |r| r.size.y);
+            painter.circle_filled(pos2(x + 4.0, y + row_h / 2.0), 2.5, pal.brand_fg);
+            let h = g.size().y;
+            painter.galley(pos2(x + BULLET_INDENT, y), g, pal.fg1);
+            y += h + BULLET_GAP;
+        }
+    }
 }
 
-/// A help bar in normal layout flow, across the available width.
-pub fn help_bar(ui: &mut Ui, pal: &Palette, text: &str) {
-    let galley = help_galley(ui.painter(), pal, text, ui.available_width());
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), help_height(&galley)), Sense::hover());
-    paint_help(ui.painter(), pal, rect, galley);
+/// A help callout in normal layout flow, across the available width.
+pub fn help_bar(ui: &mut Ui, pal: &Palette, help: &Help) {
+    let layout = help_layout(ui.painter(), pal, help, ui.available_width());
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), layout.height), Sense::hover());
+    paint_help(ui.painter(), pal, rect, layout);
+}
+
+/// One line of text that ends in "…" if it would run past `max_width`.
+pub fn elided(painter: &egui::Painter, text: &str, font: egui::FontId, color: Color32, max_width: f32) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
+    job.wrap = egui::text::TextWrapping { max_width, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    painter.layout_job(job)
 }
 
 /// A Fluent subtitle-style group label.
 pub fn section_label(ui: &mut Ui, pal: &Palette, text: &str) {
-    ui.label(egui::RichText::new(text).font(semibold(14.0)).color(pal.fg2));
+    ui.label(egui::RichText::new(text).font(semibold(15.0)).color(pal.fg1));
 }
 
 /// Format milliseconds as `m:ss`.
@@ -595,9 +781,8 @@ pub fn unique(id: impl std::hash::Hash + std::fmt::Debug) -> Id {
 }
 
 // ===========================================================================
-// Skill styles: Colors (polished color finish) and Crowns (plain + crowns).
+// Skill colors: each level's polished finish.
 
-use crate::model::SkillStyle;
 use egui::epaint::RectShape;
 
 /// Sheen variants per level, so a court full of the same level doesn't look stamped.
@@ -707,8 +892,8 @@ fn finish_image(skill: Skill, variant: usize) -> egui::ColorImage {
         .map(|i| {
             let k = 10 + i * 5;
             let center = 0.08 + rnd(k) * 0.84;
-            let width = 0.012 + rnd(k + 1) * 0.05;
-            let strength = 0.35 + rnd(k + 2) * 0.45;
+            let width = 0.06 + rnd(k + 1) * 0.09;
+            let strength = 0.14 + rnd(k + 2) * 0.16;
             let hue = swing * (0.6 + rnd(k + 3) * 0.8);
             (center, width, strength, hue)
         })
@@ -723,7 +908,7 @@ fn finish_image(skill: Skill, variant: usize) -> egui::ColorImage {
         } else {
             0.58 + 0.26 * smooth((v - horizon) / (1.0 - horizon))
         };
-        let streak = (hash01(seed ^ (y as u32 * 31 + 5)) - 0.5) * 0.05;
+        let streak = (hash01(seed ^ (y as u32 * 31 + 5)) - 0.5) * 0.02;
         for x in 0..W {
             let u = (x as f32 + 0.5) / W as f32;
             let grain = (hash01(seed ^ ((y * W + x) as u32 + 7)) - 0.5) * 0.015;
@@ -739,7 +924,7 @@ fn finish_image(skill: Skill, variant: usize) -> egui::ColorImage {
             }
             // Width is 4× height, so stretch the hotspot horizontally to stay round.
             let (dx, dy) = ((u - hx) * 4.0, v - hy);
-            let spot = (-(dx * dx + dy * dy) / (hr * hr)).exp() * 0.3;
+            let spot = (-(dx * dx + dy * dy) / (hr * hr)).exp() * 0.0;
             lift += spot;
             hue += spot * swing * 0.5;
             if v < 0.2 {
@@ -760,94 +945,28 @@ fn finish_image(skill: Skill, variant: usize) -> egui::ColorImage {
     egui::ColorImage::new([W, H], pixels)
 }
 
-/// A four-point twinkle (two crossed diamonds).
-fn paint_sparkle(painter: &egui::Painter, c: Pos2, r: f32, color: Color32) {
-    let thin = r * 0.22;
-    for (a, b) in [(vec2(r, 0.0), vec2(0.0, thin)), (vec2(0.0, r), vec2(thin, 0.0))] {
-        painter.add(egui::Shape::convex_polygon(vec![c - a, c + b, c + a, c - b], color, Stroke::NONE));
-    }
-}
-
-/// The background of a chip or tag in the current skill style.
+/// The background of a chip or tag: the level's color with its sheen.
 pub fn paint_skill_fill(painter: &egui::Painter, pal: &Palette, rect: Rect, radius: u8, skill: Skill, variant: usize) {
-    match theme::skill_style() {
-        SkillStyle::Colors => {
+    {
+        {
             let [_, body, lo] = theme::skill_tones(skill);
             match finish_texture(skill, variant) {
                 Some(tex) => {
                     let uv = Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0));
-                    painter.add(RectShape::filled(rect, CornerRadius::same(radius), Color32::WHITE).with_texture(tex, uv));
+                    // A touch dimmer on the dark theme so the cards don't glare.
+                    let tint = if pal.dark { Color32::from_gray(188) } else { Color32::WHITE };
+                    painter.add(RectShape::filled(rect, CornerRadius::same(radius), tint).with_texture(tex, uv));
                 }
                 None => {
                     painter.rect_filled(rect, CornerRadius::same(radius), body);
                 }
             }
             painter.rect_stroke(rect, CornerRadius::same(radius), Stroke::new(1.0, lo.gamma_multiply(0.7)), StrokeKind::Inside);
-            if skill == Skill::Expert && rect.height() >= 24.0 {
-                let r = (rect.height() * 0.11).clamp(4.0, 9.0);
-                paint_sparkle(painter, pos2(rect.right() - r * 2.2, rect.top() + r * 2.0), r, Color32::from_white_alpha(235));
-            }
-        }
-        SkillStyle::Crowns => {
-            painter.rect(rect, CornerRadius::same(radius), pal.bg1, Stroke::new(1.0, pal.stroke1), StrokeKind::Inside);
         }
     }
 }
 
-/// Text color on a chip in the current skill style.
-pub fn skill_text_color(pal: &Palette, skill: Skill) -> Color32 {
-    match theme::skill_style() {
-        SkillStyle::Crowns => pal.fg1,
-        _ => theme::on_skill_color(skill),
-    }
-}
-
-/// A row of crowns (one per level), centred on `center`. Returns its rect.
-pub fn paint_crowns(painter: &egui::Painter, pal: &Palette, center: Pos2, skill: Skill, size: f32) -> Rect {
-    let text = theme::icon::CROWN_F.repeat(theme::crown_count(skill));
-    painter.text(center, Align2::CENTER_CENTER, text, icon_font(size), theme::crown_color(pal))
-}
-
-/// Width of a crown row at this size.
-pub fn crowns_width(painter: &egui::Painter, skill: Skill, size: f32) -> f32 {
-    let text = theme::icon::CROWN_F.repeat(theme::crown_count(skill));
-    painter.layout_no_wrap(text, icon_font(size), Color32::WHITE).size().x
-}
-
-/// The bar that leads a name in a list (Colors). Crowns have no lead mark —
-/// they follow the name instead — so this returns false for them.
-pub fn paint_skill_lead(painter: &egui::Painter, column: Rect, skill: Skill) -> bool {
-    match theme::skill_style() {
-        SkillStyle::Colors => {
-            painter.rect_filled(column, CornerRadius::same(2), theme::skill_color(skill));
-            true
-        }
-        SkillStyle::Crowns => false,
-    }
-}
-
-/// A skill mark as a widget, for menu headers: bar or crowns.
-pub fn skill_mark(ui: &mut Ui, pal: &Palette, skill: Skill) {
-    match theme::skill_style() {
-        SkillStyle::Crowns => {
-            let w = crowns_width(ui.painter(), skill, 14.0);
-            let (rect, _) = ui.allocate_exact_size(vec2(w, 22.0), Sense::hover());
-            paint_crowns(ui.painter(), pal, rect.center(), skill, 14.0);
-        }
-        SkillStyle::Colors => {
-            let (rect, _) = ui.allocate_exact_size(vec2(4.0, 22.0), Sense::hover());
-            paint_skill_lead(ui.painter(), rect, skill);
-        }
-    }
-}
-
-/// Menu entry text for a level: a dot in its color, or its crowns.
-pub fn skill_menu_text(pal: &Palette, skill: Skill) -> egui::RichText {
-    match theme::skill_style() {
-        SkillStyle::Crowns => {
-            let crowns = theme::icon::CROWN_F.repeat(theme::crown_count(skill));
-            egui::RichText::new(format!("{}  {crowns}", skill.label())).color(theme::crown_color(pal))
-        }
-        _ => egui::RichText::new(format!("●  {}", skill.label())).color(theme::skill_color(skill)),
-    }
+/// Menu entry text for a level: a dot in its color, then its name.
+pub fn skill_menu_text(_pal: &Palette, skill: Skill) -> egui::RichText {
+    egui::RichText::new(format!("●  {}", skill.label())).color(theme::skill_color(skill))
 }

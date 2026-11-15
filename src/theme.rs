@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Shadow, Stroke};
 
-use crate::model::{Skill, SkillStyle};
+use crate::model::Skill;
 
 /// Glyphs from the embedded Fluent System Icons subset
 /// (`assets/fonts/FluentIcons-Goodminton.ttf`, built by `tools/build_icons.py`).
@@ -64,7 +64,6 @@ pub mod icon {
     pub const TIMER_F: &str = "\u{10000a}";
     pub const QUESTION_F: &str = "\u{10000b}";
     pub const DOWNLOAD_F: &str = "\u{10000c}";
-    pub const CROWN_F: &str = "\u{10000d}";
 }
 
 pub const ICONS: &str = "icons";
@@ -153,6 +152,10 @@ pub fn fonts() -> FontDefinitions {
 pub fn regular(size: f32) -> FontId {
     FontId::new(size, FontFamily::Proportional)
 }
+pub fn bold(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(BOLD.into()))
+}
+
 pub fn semibold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(SEMIBOLD.into()))
 }
@@ -173,6 +176,7 @@ pub struct Palette {
     pub subtle_hover: Color32,
     pub subtle_pressed: Color32,
     pub subtle_selected: Color32,
+    #[allow(dead_code)]
     pub bg_disabled: Color32,
     pub fg1: Color32,
     pub fg2: Color32,
@@ -193,15 +197,18 @@ pub struct Palette {
     pub danger: Color32,
     pub danger_hover: Color32,
     pub danger_fg: Color32,
+    #[allow(dead_code)]
     pub danger_subtle: Color32,
+    #[allow(dead_code)]
     pub success_fg: Color32,
+    #[allow(dead_code)]
     pub success_subtle: Color32,
     pub warning_fg: Color32,
     pub warning_subtle: Color32,
     pub scrim: Color32,
 }
 
-const fn hex(rgb: u32) -> Color32 {
+pub const fn hex(rgb: u32) -> Color32 {
     Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
 }
 
@@ -240,7 +247,7 @@ impl Palette {
         success_subtle: hex(0xF1FAF1),
         warning_fg: hex(0xBC4B09),
         warning_subtle: hex(0xFFF9F5),
-        scrim: Color32::from_rgba_premultiplied(0, 0, 0, 102),
+        scrim: Color32::from_rgba_premultiplied(0, 0, 0, 165),
     };
 
     pub const DARK: Palette = Palette {
@@ -267,17 +274,17 @@ impl Palette {
         brand_pressed: hex(0x0C3B5E),
         on_brand: hex(0xFFFFFF),
         brand_fg: hex(0x479EF5),
-        brand_subtle: hex(0x082338),
-        on_brand_subtle: hex(0x62ABF5),
+        brand_subtle: hex(0x0C3354),
+        on_brand_subtle: hex(0x96C6FA),
         danger: hex(0xC50F1F),
         danger_hover: hex(0xD13438),
         danger_fg: hex(0xDC626D),
-        danger_subtle: hex(0x3F1011),
-        success_fg: hex(0x54B054),
-        success_subtle: hex(0x052505),
-        warning_fg: hex(0xFAA06B),
-        warning_subtle: hex(0x4A1E04),
-        scrim: Color32::from_rgba_premultiplied(0, 0, 0, 128),
+        danger_subtle: hex(0x5A1418),
+        success_fg: hex(0x6CCB5F),
+        success_subtle: hex(0x0E3A0E),
+        warning_fg: hex(0xFAB37F),
+        warning_subtle: hex(0x5A2A0A),
+        scrim: Color32::from_rgba_premultiplied(0, 0, 0, 160),
     };
 
     pub fn get(dark: bool) -> &'static Palette {
@@ -319,24 +326,6 @@ impl Palette {
     }
 }
 
-static SKILL_STYLE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-/// The skill display style from Settings; set once per frame.
-pub fn set_skill_style(style: SkillStyle) {
-    let v = match style {
-        SkillStyle::Colors => 0,
-        SkillStyle::Crowns => 1,
-    };
-    SKILL_STYLE.store(v, std::sync::atomic::Ordering::Relaxed);
-}
-
-pub fn skill_style() -> SkillStyle {
-    match SKILL_STYLE.load(std::sync::atomic::Ordering::Relaxed) {
-        1 => SkillStyle::Crowns,
-        _ => SkillStyle::Colors,
-    }
-}
-
 /// The chip color for each level: a brighter, lighter cut of the classic
 /// color, light enough for dark text on every level.
 fn chip_color(skill: Skill) -> Color32 {
@@ -354,15 +343,6 @@ pub fn skill_tones(skill: Skill) -> [Color32; 3] {
     [lerp_color(body, Color32::WHITE, 0.35), body, lerp_color(body, Color32::BLACK, 0.22)]
 }
 
-/// Crowns for the Crowns style: one per level.
-pub fn crown_count(skill: Skill) -> usize {
-    skill.rank() as usize + 1
-}
-
-pub fn crown_color(pal: &Palette) -> Color32 {
-    if pal.dark { hex(0xF2C94C) } else { hex(0xC28E00) }
-}
-
 /// Classic skill colors: Beginner yellow, Intermediate red, Advanced green,
 /// Expert blue (from the Fluent shared color palette).
 fn classic_color(skill: Skill) -> Color32 {
@@ -376,10 +356,7 @@ fn classic_color(skill: Skill) -> Color32 {
 
 /// A flat color that stands for the level in the current style (dots, menus).
 pub fn skill_color(skill: Skill) -> Color32 {
-    match skill_style() {
-        SkillStyle::Colors => classic_color(skill),
-        SkillStyle::Crowns => hex(0xC28E00),
-    }
+    classic_color(skill)
 }
 
 /// Readable text on a skill-colored chip: a deep shade of the chip's own hue.

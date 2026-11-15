@@ -343,7 +343,13 @@ impl Store {
 
     pub fn days(&self) -> rusqlite::Result<Vec<DaySummary>> {
         let mut stmt = self.conn.prepare(
-            "SELECT d.id, d.started_at, d.ended_at,
+            // The day runs from the first check-in to the last game (not to when
+            // the app noticed the day was over, which can be the next morning).
+            "SELECT d.id,
+                    COALESCE((SELECT MIN(checked_in_at) FROM attendance a WHERE a.game_day_id = d.id), d.started_at),
+                    CASE WHEN d.ended_at IS NULL THEN NULL
+                         -- A game closed out the next morning still only lasted a round or so.
+                         ELSE COALESCE((SELECT MAX(MIN(ended_at, started_at + 3600000)) FROM games g WHERE g.game_day_id = d.id), d.ended_at) END,
                     (SELECT COUNT(DISTINCT player_id) FROM attendance a WHERE a.game_day_id = d.id),
                     (SELECT COUNT(*) FROM games g WHERE g.game_day_id = d.id)
              FROM game_days d ORDER BY d.started_at DESC",
@@ -357,7 +363,8 @@ impl Store {
                 games: r.get(4)?,
             })
         })?;
-        rows.filter(|d| d.as_ref().map_or(true, |d| d.players > 0))
+        // Finished days where nobody played are just noise.
+        rows.filter(|d| d.as_ref().map_or(true, |d| d.players > 0 && (d.games > 0 || d.ended_ms.is_none())))
             .collect()
     }
 

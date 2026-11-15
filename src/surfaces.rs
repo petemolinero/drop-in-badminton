@@ -245,9 +245,9 @@ pub fn paint_court(p: &egui::Painter, tex: &Surfaces, dark: bool, index: usize, 
     let snap = |v: f32| (v * ppp).round() / ppp;
     let clipped = p.with_clip_rect(surface.intersect(p.clip_rect()));
     // Dark mode turns the hall lights down.
-    let lit = |full: u8, dimmed: u8| Color32::from_gray(if dark { dimmed } else { full });
+    let lit = |full: u8, dimmed: u8| Color32::from_gray(if dark { (dimmed as f32 * 0.68) as u8 } else { full });
     let paint = |c: Color32| {
-        let k = if dark { 0.7 } else { 1.0 };
+        let k = if dark { 0.6 } else { 1.0 };
         rgb(c.r() as f32 * k, c.g() as f32 * k, c.b() as f32 * k)
     };
     let tiled = |t: &TextureHandle, r: Rect, origin: Vec2| {
