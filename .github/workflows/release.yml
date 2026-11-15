@@ -1,0 +1,75 @@
+# Builds Goodminton and publishes a GitHub Release when a version tag is pushed.
+# The app's Update button downloads the file for its platform from the latest release.
+#
+#   tools/release.sh 0.2.0 "What changed"
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: windows-latest
+            built: target/release/goodminton.exe
+            asset: goodminton-windows-x86_64.exe
+          - os: ubuntu-latest
+            built: target/release/goodminton
+            asset: goodminton-linux-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag must match Cargo.toml version
+        shell: bash
+        run: |
+          want="v$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          if [ "$GITHUB_REF_NAME" != "$want" ]; then
+            echo "Tag $GITHUB_REF_NAME doesn't match Cargo.toml ($want)"; exit 1
+          fi
+
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo test --release
+      - run: cargo build --release
+
+      - name: Rename for upload
+        shell: bash
+        run: mkdir dist && cp "${{ matrix.built }}" "dist/${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release notes from the tag message
+        run: |
+          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
+          cat notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Goodminton ${{ github.ref_name }}
+          body_path: notes.md
+          files: dist/*

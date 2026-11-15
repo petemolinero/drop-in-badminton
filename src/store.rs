@@ -1,0 +1,481 @@
+//! SQLite storage: the roster, settings, and week-to-week history.
+//!
+//! Tables:
+//! * `players` — everyone who has ever come. Removing someone from the roster
+//!   archives them, so their history stays intact.
+//! * `game_days`, `attendance`, `games`, `game_players` — the history.
+//! * `meta` — settings and the live session (courts, on-deck, timer) as JSON,
+//!   so the app resumes exactly where it left off.
+//!
+//! The current game day's history lives in memory (so undo just works) and is
+//! mirrored into its tables on every save. Past days are never modified.
+
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
+
+use crate::model::*;
+
+pub struct Store {
+    conn: Connection,
+}
+
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS players (
+    id             INTEGER PRIMARY KEY,
+    name           TEXT    NOT NULL,
+    skill          TEXT    NOT NULL,
+    lifetime_games INTEGER NOT NULL DEFAULT 0,
+    archived       INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS game_days (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at INTEGER NOT NULL,
+    ended_at   INTEGER
+);
+CREATE TABLE IF NOT EXISTS attendance (
+    id             INTEGER PRIMARY KEY,
+    game_day_id    INTEGER NOT NULL REFERENCES game_days(id) ON DELETE CASCADE,
+    player_id      INTEGER NOT NULL REFERENCES players(id),
+    checked_in_at  INTEGER NOT NULL,
+    checked_out_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS games (
+    id          INTEGER PRIMARY KEY,
+    game_day_id INTEGER NOT NULL REFERENCES game_days(id) ON DELETE CASCADE,
+    round       INTEGER NOT NULL,
+    court       INTEGER NOT NULL,
+    started_at  INTEGER NOT NULL,
+    ended_at    INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS game_players (
+    game_id   INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+    player_id INTEGER NOT NULL REFERENCES players(id),
+    team      INTEGER NOT NULL,
+    slot      INTEGER NOT NULL,
+    PRIMARY KEY (game_id, player_id)
+);
+CREATE INDEX IF NOT EXISTS attendance_day ON attendance(game_day_id);
+CREATE INDEX IF NOT EXISTS attendance_player ON attendance(player_id);
+CREATE INDEX IF NOT EXISTS games_day ON games(game_day_id);
+CREATE INDEX IF NOT EXISTS game_players_player ON game_players(player_id);
+PRAGMA user_version = 1;
+";
+
+/// A row in the history list.
+#[derive(Clone, Debug)]
+pub struct DaySummary {
+    pub id: i64,
+    pub started_ms: i64,
+    pub ended_ms: Option<i64>,
+    pub players: u32,
+    pub games: u32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DayDetail {
+    /// (name, skill, games played that day), most games first.
+    pub attendees: Vec<(String, Skill, u32)>,
+    pub games: Vec<PastGame>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PastGame {
+    pub round: u32,
+    pub court: usize,
+    pub started_ms: i64,
+    pub ended_ms: i64,
+    pub team_a: Vec<(String, Skill)>,
+    pub team_b: Vec<(String, Skill)>,
+}
+
+fn skill_to_str(s: Skill) -> &'static str {
+    s.label()
+}
+
+fn skill_from_str(s: &str) -> Skill {
+    Skill::ALL
+        .into_iter()
+        .find(|k| k.label() == s)
+        .unwrap_or(Skill::Intermediate)
+}
+
+pub fn db_path() -> PathBuf {
+    data_dir().join("goodminton.db")
+}
+
+impl Store {
+    pub fn open_default() -> rusqlite::Result<Self> {
+        let path = db_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let store = Self::open(&path)?;
+        store.import_legacy_json(&data_dir().join("state.json"));
+        Ok(store)
+    }
+
+    pub fn open(path: &Path) -> rusqlite::Result<Self> {
+        let conn = Connection::open(path)?;
+        Self::init(conn)
+    }
+
+    pub fn open_in_memory() -> rusqlite::Result<Self> {
+        Self::init(Connection::open_in_memory()?)
+    }
+
+    fn init(conn: Connection) -> rusqlite::Result<Self> {
+        conn.pragma_update(None, "foreign_keys", true)?;
+        // Right after an update the old copy may still be finishing its last save.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // WAL keeps writes cheap and crash-safe.
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        conn.execute_batch(SCHEMA)?;
+        Ok(Self { conn })
+    }
+
+    fn meta(&self, key: &str) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .optional()
+    }
+
+    /// Record which app version opened this database; returns the previous one.
+    pub fn swap_app_version(&self, current: &str) -> Option<String> {
+        let previous = self.meta("app_version").ok().flatten();
+        let _ = self.conn.execute(
+            "INSERT INTO meta(key, value) VALUES ('app_version', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [current],
+        );
+        previous
+    }
+
+    /// A consistent copy of the whole database, safe to take while it's open.
+    pub fn backup_to(&self, path: &Path) -> rusqlite::Result<()> {
+        self.conn.execute("VACUUM INTO ?1", [path.to_string_lossy()])?;
+        Ok(())
+    }
+
+    /// One-time import from the JSON file earlier versions used.
+    fn import_legacy_json(&self, path: &Path) {
+        if self.meta("settings").ok().flatten().is_some() {
+            return;
+        }
+        let Ok(text) = std::fs::read_to_string(path) else { return };
+        let mut state: AppState = match serde_json::from_str(&text) {
+            Ok(s) => s,
+            Err(err) => {
+                eprintln!("goodminton: could not import {path:?}: {err}");
+                return;
+            }
+        };
+        // The old format didn't log attendance; reconstruct today's.
+        if state.session.attendance.is_empty() {
+            state.session.attendance = state
+                .session
+                .present
+                .iter()
+                .map(|(id, p)| Attendance {
+                    player: *id,
+                    in_ms: p.checked_in_ms,
+                    out_ms: None,
+                })
+                .collect();
+        }
+        match self.save(&mut state) {
+            Ok(()) => {
+                let _ = std::fs::rename(path, path.with_extension("json.imported"));
+            }
+            Err(err) => eprintln!("goodminton: import failed: {err}"),
+        }
+    }
+
+    pub fn load(&self) -> rusqlite::Result<AppState> {
+        let mut state = AppState::default();
+        if let Some(json) = self.meta("settings")? {
+            state.settings = serde_json::from_str(&json).unwrap_or_default();
+        }
+        if let Some(json) = self.meta("session")? {
+            match serde_json::from_str(&json) {
+                Ok(session) => state.session = session,
+                Err(err) => eprintln!("goodminton: could not restore session: {err}"),
+            }
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, skill, lifetime_games FROM players WHERE archived = 0",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Player {
+                id: r.get::<_, i64>(0)? as PlayerId,
+                name: r.get(1)?,
+                skill: skill_from_str(&r.get::<_, String>(2)?),
+                lifetime_games: r.get(3)?,
+            })
+        })?;
+        for p in rows {
+            let p = p?;
+            state.players.insert(p.id, p);
+        }
+        // Never reuse an id, even an archived one: history points at it.
+        let max_id: Option<i64> = self
+            .conn
+            .query_row("SELECT MAX(id) FROM players", [], |r| r.get(0))?;
+        state.next_id = max_id.map_or(0, |m| m as PlayerId + 1);
+        // Drop session references to players that no longer exist.
+        let players = &state.players;
+        state.session.present.retain(|id, _| players.contains_key(id));
+        Ok(state)
+    }
+
+    /// Write everything. May assign `state.session.day_id`.
+    pub fn save(&self, state: &mut AppState) -> rusqlite::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        Self::save_players(&tx, &state.players)?;
+        Self::save_day(&tx, &mut state.session)?;
+        let settings = serde_json::to_string(&state.settings).expect("settings serialize");
+        let session = serde_json::to_string(&state.session).expect("session serialize");
+        for (k, v) in [("settings", settings), ("session", session)] {
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![k, v],
+            )?;
+        }
+        tx.commit()
+    }
+
+    fn save_players(tx: &Transaction, players: &BTreeMap<PlayerId, Player>) -> rusqlite::Result<()> {
+        let mut upsert = tx.prepare_cached(
+            "INSERT INTO players(id, name, skill, lifetime_games, archived) VALUES (?1, ?2, ?3, ?4, 0)
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name, skill = excluded.skill,
+                 lifetime_games = excluded.lifetime_games, archived = 0",
+        )?;
+        for p in players.values() {
+            upsert.execute(params![p.id as i64, p.name, skill_to_str(p.skill), p.lifetime_games])?;
+        }
+        // Anyone no longer on the roster is archived, keeping their history.
+        let ids: Vec<i64> = {
+            let mut stmt = tx.prepare_cached("SELECT id FROM players WHERE archived = 0")?;
+            stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?
+        };
+        for id in ids {
+            if !players.contains_key(&(id as PlayerId)) {
+                tx.execute("UPDATE players SET archived = 1 WHERE id = ?1", [id])?;
+            }
+        }
+        Ok(())
+    }
+
+    fn save_day(tx: &Transaction, session: &mut Session) -> rusqlite::Result<()> {
+        if session.attendance.is_empty() && session.day_id.is_none() {
+            return Ok(()); // Nothing has happened today yet.
+        }
+        let started = session
+            .attendance
+            .iter()
+            .map(|a| a.in_ms)
+            .min()
+            .unwrap_or_else(now_ms);
+        let day_id = match session.day_id {
+            Some(id) => {
+                tx.execute(
+                    "INSERT INTO game_days(id, started_at, ended_at) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(id) DO UPDATE SET started_at = excluded.started_at,
+                         ended_at = excluded.ended_at",
+                    params![id, started, session.day_ended_ms],
+                )?;
+                id
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO game_days(started_at, ended_at) VALUES (?1, ?2)",
+                    params![started, session.day_ended_ms],
+                )?;
+                tx.last_insert_rowid()
+            }
+        };
+        session.day_id = Some(day_id);
+
+        // Rewrite this day's rows from memory (a few dozen rows at most).
+        tx.execute("DELETE FROM attendance WHERE game_day_id = ?1", [day_id])?;
+        tx.execute("DELETE FROM games WHERE game_day_id = ?1", [day_id])?;
+        {
+            let mut ins = tx.prepare_cached(
+                "INSERT INTO attendance(game_day_id, player_id, checked_in_at, checked_out_at)
+                 SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM players WHERE id = ?2)",
+            )?;
+            for a in &session.attendance {
+                ins.execute(params![day_id, a.player as i64, a.in_ms, a.out_ms])?;
+            }
+        }
+        let mut ins_game = tx.prepare_cached(
+            "INSERT INTO games(game_day_id, round, court, started_at, ended_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
+        let mut ins_player = tx.prepare_cached(
+            "INSERT OR IGNORE INTO game_players(game_id, player_id, team, slot)
+             SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM players WHERE id = ?2)",
+        )?;
+        for g in &session.games {
+            ins_game.execute(params![day_id, g.round, g.court as i64, g.started_ms, g.ended_ms])?;
+            let game_id = tx.last_insert_rowid();
+            for (slot, pid) in g.players.iter().enumerate() {
+                if let Some(pid) = pid {
+                    ins_player.execute(params![game_id, *pid as i64, (slot / 2) as i64, slot as i64])?;
+                }
+            }
+        }
+        // Tidy up days that ended up empty (e.g. after undoing "New game day").
+        tx.execute(
+            "DELETE FROM game_days WHERE id != ?1
+               AND NOT EXISTS (SELECT 1 FROM attendance WHERE game_day_id = game_days.id)",
+            [day_id],
+        )?;
+        Ok(())
+    }
+
+    // ----- History queries --------------------------------------------------
+
+    pub fn days(&self) -> rusqlite::Result<Vec<DaySummary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT d.id, d.started_at, d.ended_at,
+                    (SELECT COUNT(DISTINCT player_id) FROM attendance a WHERE a.game_day_id = d.id),
+                    (SELECT COUNT(*) FROM games g WHERE g.game_day_id = d.id)
+             FROM game_days d ORDER BY d.started_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(DaySummary {
+                id: r.get(0)?,
+                started_ms: r.get(1)?,
+                ended_ms: r.get(2)?,
+                players: r.get(3)?,
+                games: r.get(4)?,
+            })
+        })?;
+        rows.filter(|d| d.as_ref().map_or(true, |d| d.players > 0))
+            .collect()
+    }
+
+    pub fn day_detail(&self, day_id: i64) -> rusqlite::Result<DayDetail> {
+        let mut detail = DayDetail::default();
+        let mut stmt = self.conn.prepare(
+            "SELECT p.name, p.skill,
+                    (SELECT COUNT(*) FROM game_players gp JOIN games g ON g.id = gp.game_id
+                      WHERE g.game_day_id = ?1 AND gp.player_id = p.id) AS n
+             FROM players p
+             WHERE p.id IN (SELECT player_id FROM attendance WHERE game_day_id = ?1)
+             ORDER BY n DESC, p.name COLLATE NOCASE",
+        )?;
+        detail.attendees = stmt
+            .query_map([day_id], |r| {
+                Ok((r.get(0)?, skill_from_str(&r.get::<_, String>(1)?), r.get(2)?))
+            })?
+            .collect::<Result<_, _>>()?;
+
+        let mut stmt = self.conn.prepare(
+            "SELECT g.id, g.round, g.court, g.started_at, g.ended_at, p.name, p.skill, gp.team
+             FROM games g
+             JOIN game_players gp ON gp.game_id = g.id
+             JOIN players p ON p.id = gp.player_id
+             WHERE g.game_day_id = ?1
+             ORDER BY g.started_at, g.court, gp.slot",
+        )?;
+        let mut by_game: Vec<(i64, PastGame)> = Vec::new();
+        let mut index: HashMap<i64, usize> = HashMap::new();
+        let rows = stmt.query_map([day_id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, u32>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, String>(5)?,
+                skill_from_str(&r.get::<_, String>(6)?),
+                r.get::<_, i64>(7)?,
+            ))
+        })?;
+        for row in rows {
+            let (gid, round, court, start, end, name, skill, team) = row?;
+            let i = *index.entry(gid).or_insert_with(|| {
+                by_game.push((
+                    gid,
+                    PastGame {
+                        round,
+                        court: court as usize,
+                        started_ms: start,
+                        ended_ms: end,
+                        team_a: Vec::new(),
+                        team_b: Vec::new(),
+                    },
+                ));
+                by_game.len() - 1
+            });
+            let g = &mut by_game[i].1;
+            if team == 0 {
+                g.team_a.push((name, skill));
+            } else {
+                g.team_b.push((name, skill));
+            }
+        }
+        detail.games = by_game.into_iter().map(|(_, g)| g).collect();
+        Ok(detail)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::Target;
+
+    #[test]
+    fn round_trip_and_history() {
+        let store = Store::open_in_memory().unwrap();
+        let mut s = AppState::default();
+        s.settings.courts = 1;
+        s.sync_court_count(0);
+        let ids: Vec<_> = (0..5).map(|i| s.add_player(&format!("P{i}"), Skill::Advanced)).collect();
+        for id in &ids {
+            s.check_in(*id, 0);
+        }
+        s.next_round(60_000);
+        s.next_round(16 * 60_000);
+        store.save(&mut s).unwrap();
+        let day = s.session.day_id.expect("day created on save");
+
+        // Reload: roster, session, and today's history all come back.
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.players.len(), 5);
+        assert_eq!(loaded.session.games.len(), 1);
+        assert_eq!(loaded.session.day_id, Some(day));
+
+        // Saving again doesn't duplicate rows.
+        store.save(&mut s).unwrap();
+        let days = store.days().unwrap();
+        assert_eq!(days.len(), 1);
+        assert_eq!((days[0].players, days[0].games), (5, 1));
+
+        // End the day and start a new one: last week's history stays put.
+        s.end_day(20 * 60_000);
+        store.save(&mut s).unwrap();
+        s.new_day();
+        // Removing a player archives them but keeps the history.
+        s.delete_player(ids[0], 0);
+        s.move_player(ids[1], Target::Slot(Spot::Deck(0, 0)), 7 * 86_400_000);
+        store.save(&mut s).unwrap();
+
+        let days = store.days().unwrap();
+        assert_eq!(days.len(), 2);
+        let last_week = store.day_detail(day).unwrap();
+        assert_eq!(last_week.attendees.len(), 5);
+        assert_eq!(last_week.games.len(), 2);
+        assert_eq!(last_week.games[0].team_a.len() + last_week.games[0].team_b.len(), 4);
+        let reloaded = store.load().unwrap();
+        assert_eq!(reloaded.players.len(), 4);
+        assert!(reloaded.next_id > ids[4], "archived ids are never reused");
+    }
+}
