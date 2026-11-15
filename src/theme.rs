@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Shadow, Stroke};
 
-use crate::model::Skill;
+use crate::model::{Skill, SkillStyle};
 
 /// Glyphs from the embedded Fluent System Icons subset
 /// (`assets/fonts/FluentIcons-Goodminton.ttf`, built by `tools/build_icons.py`).
@@ -64,6 +64,7 @@ pub mod icon {
     pub const TIMER_F: &str = "\u{10000a}";
     pub const QUESTION_F: &str = "\u{10000b}";
     pub const DOWNLOAD_F: &str = "\u{10000c}";
+    pub const CROWN_F: &str = "\u{10000d}";
 }
 
 pub const ICONS: &str = "icons";
@@ -318,9 +319,53 @@ impl Palette {
     }
 }
 
-/// Skill colors: Beginner yellow, Intermediate red, Advanced green, Expert blue
-/// (from the Fluent shared color palette).
-pub fn skill_color(skill: Skill) -> Color32 {
+static SKILL_STYLE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The skill display style from Settings; set once per frame.
+pub fn set_skill_style(style: SkillStyle) {
+    let v = match style {
+        SkillStyle::Colors => 0,
+        SkillStyle::Crowns => 1,
+    };
+    SKILL_STYLE.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn skill_style() -> SkillStyle {
+    match SKILL_STYLE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => SkillStyle::Crowns,
+        _ => SkillStyle::Colors,
+    }
+}
+
+/// The chip color for each level: a brighter, lighter cut of the classic
+/// color, light enough for dark text on every level.
+fn chip_color(skill: Skill) -> Color32 {
+    match skill {
+        Skill::Beginner => hex(0xFFE04A),
+        Skill::Intermediate => hex(0xFF8A80),
+        Skill::Advanced => hex(0x6FD67A),
+        Skill::Expert => hex(0x6CB2FF),
+    }
+}
+
+/// The level's chip color as (highlight, body, shadow), for its polished finish.
+pub fn skill_tones(skill: Skill) -> [Color32; 3] {
+    let body = chip_color(skill);
+    [lerp_color(body, Color32::WHITE, 0.35), body, lerp_color(body, Color32::BLACK, 0.22)]
+}
+
+/// Crowns for the Crowns style: one per level.
+pub fn crown_count(skill: Skill) -> usize {
+    skill.rank() as usize + 1
+}
+
+pub fn crown_color(pal: &Palette) -> Color32 {
+    if pal.dark { hex(0xF2C94C) } else { hex(0xC28E00) }
+}
+
+/// Classic skill colors: Beginner yellow, Intermediate red, Advanced green,
+/// Expert blue (from the Fluent shared color palette).
+fn classic_color(skill: Skill) -> Color32 {
     match skill {
         Skill::Beginner => hex(0xFCE100),
         Skill::Intermediate => hex(0xD13438),
@@ -329,11 +374,21 @@ pub fn skill_color(skill: Skill) -> Color32 {
     }
 }
 
-/// Readable text on top of a skill color.
+/// A flat color that stands for the level in the current style (dots, menus).
+pub fn skill_color(skill: Skill) -> Color32 {
+    match skill_style() {
+        SkillStyle::Colors => classic_color(skill),
+        SkillStyle::Crowns => hex(0xC28E00),
+    }
+}
+
+/// Readable text on a skill-colored chip: a deep shade of the chip's own hue.
 pub fn on_skill_color(skill: Skill) -> Color32 {
     match skill {
-        Skill::Beginner => hex(0x242424),
-        _ => Color32::WHITE,
+        Skill::Beginner => hex(0x3D2A00),
+        Skill::Intermediate => hex(0x4A0D0D),
+        Skill::Advanced => hex(0x06301A),
+        Skill::Expert => hex(0x0A2148),
     }
 }
 

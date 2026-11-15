@@ -54,6 +54,29 @@ impl Skill {
     }
 }
 
+/// How skill levels are drawn on chips, tags and lists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SkillStyle {
+    /// A different bright color per level, with a polished sheen.
+    /// (Earlier builds had a separate "Medals" style; it maps here.)
+    #[default]
+    #[serde(alias = "Medals")]
+    Colors,
+    /// Plain cards with one to four crowns.
+    Crowns,
+}
+
+impl SkillStyle {
+    pub const ALL: [SkillStyle; 2] = [SkillStyle::Colors, SkillStyle::Crowns];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SkillStyle::Colors => "Colors",
+            SkillStyle::Crowns => "Crowns",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Player {
     pub id: PlayerId,
@@ -75,6 +98,7 @@ pub struct Settings {
     pub auto_start_timer: bool,
     pub dark_mode: bool,
     pub ui_scale: f32,
+    pub skill_style: SkillStyle,
 }
 
 impl Default for Settings {
@@ -87,6 +111,7 @@ impl Default for Settings {
             auto_start_timer: false,
             dark_mode: true,
             ui_scale: 1.0,
+            skill_style: SkillStyle::Colors,
         }
     }
 }

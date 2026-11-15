@@ -253,33 +253,51 @@ pub fn stepper(ui: &mut Ui, pal: &Palette, value: &mut u32, min: u32, max: u32, 
     changed
 }
 
-/// A skill tag. Selected tags are filled with the skill color; others are
-/// outlined with a colored dot. `compact` shows just the initial.
+/// A skill tag. Selected tags are filled in the skill style; others are
+/// outlined with a small mark. `compact` shows just a square badge.
 pub fn skill_pill(ui: &mut Ui, pal: &Palette, skill: Skill, selected: bool, compact: bool) -> Response {
-    let base = theme::skill_color(skill);
+    let style = theme::skill_style();
     let font = semibold(13.0);
     if compact {
         let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
         let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
         let (h, _) = interaction(ui, &resp);
         let p = ui.painter();
-        p.rect_filled(rect, CornerRadius::same(4), lerp_color(base, Color32::BLACK, h * 0.15));
-        p.text(rect.center(), Align2::CENTER_CENTER, &skill.label()[..1], font, theme::on_skill_color(skill));
+        paint_skill_fill(p, pal, rect, 4, skill, skill.rank() as usize);
+        if h > 0.0 {
+            p.rect_filled(rect, CornerRadius::same(4), Color32::from_black_alpha((h * 30.0) as u8));
+        }
+        if style == SkillStyle::Crowns {
+            paint_crown_grid(p, pal, rect, skill);
+        } else {
+            p.text(rect.center(), Align2::CENTER_CENTER, &skill.label()[..1], font, theme::on_skill_color(skill));
+        }
         return resp.on_hover_text(format!("{} — click to change", skill.label()));
     }
     let galley = ui.painter().layout_no_wrap(skill.label().to_owned(), font, Color32::WHITE);
-    let dot = if selected { 0.0 } else { 12.0 };
-    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 18.0 + dot, 30.0), Sense::click());
+    let crowns = if style == SkillStyle::Crowns { crowns_width(ui.painter(), skill, 13.0) + 6.0 } else { 0.0 };
+    let dot = if selected || style == SkillStyle::Crowns { 0.0 } else { 12.0 };
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 18.0 + dot + crowns, 30.0), Sense::click());
     let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
     let st = interaction(ui, &resp);
     let p = ui.painter();
-    if selected {
-        p.rect_filled(rect, CornerRadius::same(4), base);
+    let text_x;
+    if style == SkillStyle::Crowns {
+        let fill = if selected { pal.subtle_selected } else { state_color(pal.bg1, pal.bg1_hover, pal.bg1_pressed, st) };
+        let stroke = if selected { pal.stroke_accessible } else { pal.stroke1 };
+        p.rect(rect, CornerRadius::same(4), fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
+        let w = crowns - 6.0;
+        paint_crowns(p, pal, pos2(rect.left() + 9.0 + w / 2.0, rect.center().y), skill, 13.0);
+        text_x = rect.left() + 9.0 + crowns;
+        p.galley_with_override_text_color(pos2(text_x, rect.center().y - galley.size().y / 2.0), galley, pal.fg1);
+    } else if selected {
+        paint_skill_fill(p, pal, rect, 4, skill, skill.rank() as usize);
         p.galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, theme::on_skill_color(skill));
     } else {
         let fill = state_color(pal.bg1, pal.bg1_hover, pal.bg1_pressed, st);
         p.rect(rect, CornerRadius::same(4), fill, Stroke::new(1.0, pal.stroke1), StrokeKind::Inside);
-        p.circle_filled(pos2(rect.left() + 13.0, rect.center().y), 4.5, base);
+        let dot_rect = Rect::from_center_size(pos2(rect.left() + 13.0, rect.center().y), vec2(9.0, 9.0));
+        p.circle_filled(dot_rect.center(), 4.5, theme::skill_color(skill));
         p.galley_with_override_text_color(
             pos2(rect.left() + 9.0 + dot, rect.center().y - galley.size().y / 2.0),
             galley,
@@ -287,6 +305,23 @@ pub fn skill_pill(ui: &mut Ui, pal: &Palette, skill: Skill, selected: bool, comp
         );
     }
     resp
+}
+
+/// One to four crowns packed into a small square (2 × 2 at most).
+fn paint_crown_grid(painter: &egui::Painter, pal: &Palette, rect: Rect, skill: Skill) {
+    let n = theme::crown_count(skill);
+    let size = if n == 1 { 16.0 } else { 11.0 };
+    let c = rect.center();
+    let (dx, dy) = (5.5, 5.5);
+    let spots: &[Vec2] = match n {
+        1 => &[Vec2::ZERO],
+        2 => &[vec2(-dx, 0.0), vec2(dx, 0.0)],
+        3 => &[vec2(-dx, -dy), vec2(dx, -dy), vec2(0.0, dy)],
+        _ => &[vec2(-dx, -dy), vec2(dx, -dy), vec2(-dx, dy), vec2(dx, dy)],
+    };
+    for o in spots {
+        painter.text(c + *o, Align2::CENTER_CENTER, theme::icon::CROWN_F, icon_font(size), theme::crown_color(pal));
+    }
 }
 
 /// Fit text into `max_width` by shrinking the font, returning the font size.
@@ -301,9 +336,45 @@ fn fit(painter: &egui::Painter, text: &str, family: fn(f32) -> egui::FontId, siz
     if w > max_width && w > 0.0 { (size * max_width / w).floor().max(8.0) } else { size }
 }
 
+/// A Fluent segmented control (tab-like buttons in a tray). Returns true when changed.
+pub fn segmented<T: Copy + PartialEq>(ui: &mut Ui, pal: &Palette, value: &mut T, options: &[T], label: fn(T) -> &'static str) -> bool {
+    let font = regular(14.0);
+    let galleys: Vec<_> = options.iter().map(|&o| ui.painter().layout_no_wrap(label(o).to_owned(), font.clone(), pal.fg1)).collect();
+    let widths: Vec<f32> = galleys.iter().map(|g| g.size().x + 24.0).collect();
+    let (tray, tray_resp) = ui.allocate_exact_size(vec2(widths.iter().sum::<f32>() + 4.0, 32.0), Sense::hover());
+    ui.painter().rect(tray, CornerRadius::same(4), pal.bg2, Stroke::new(1.0, pal.stroke2), StrokeKind::Inside);
+    let mut x = tray.left() + 2.0;
+    let mut changed = false;
+    for ((&option, galley), w) in options.iter().zip(galleys).zip(widths) {
+        let rect = Rect::from_min_size(pos2(x, tray.top() + 2.0), vec2(w, tray.height() - 4.0));
+        x += w;
+        let resp = ui.interact(rect, tray_resp.id.with(label(option)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+        let on = *value == option;
+        let st = interaction(ui, &resp);
+        let p = ui.painter();
+        if on {
+            p.rect(rect, CornerRadius::same(3), pal.bg1, Stroke::new(1.0, pal.stroke1), StrokeKind::Inside);
+        } else if st.0 > 0.0 {
+            p.rect_filled(rect, CornerRadius::same(3), pal.subtle_hover.gamma_multiply(st.0));
+        }
+        let fg = if on { pal.fg1 } else { pal.fg2 };
+        p.galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, fg);
+        if on {
+            let bar = Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 2.0), vec2(14.0, 2.5));
+            p.rect_filled(bar, CornerRadius::same(1), pal.brand_fg);
+        }
+        if resp.clicked() && !on {
+            *value = option;
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// A short vertical bar in a player's skill color, used to mark list rows.
-pub fn paint_skill_bar(painter: &egui::Painter, rect: Rect, skill: Skill) {
-    painter.rect_filled(rect, CornerRadius::same(2), theme::skill_color(skill));
+/// Crowns show nothing here.
+pub fn paint_skill_bar(painter: &egui::Painter, rect: Rect, skill: Skill) -> bool {
+    paint_skill_lead(painter, rect, skill)
 }
 
 /// Paint a player chip: a skill-colored card with the name.
@@ -320,8 +391,8 @@ pub fn paint_player_chip(
     highlight: bool,
     detail: Option<&str>,
 ) {
-    let base = theme::skill_color(skill);
-    let fg = theme::on_skill_color(skill);
+    let fg = skill_text_color(pal, skill);
+    let crowns = theme::skill_style() == SkillStyle::Crowns;
     let r = (rect.height() * 0.16).clamp(4.0, 10.0) as u8;
     elevate(painter, pal, rect, r, 2);
     if lifted > 0.0 {
@@ -331,8 +402,11 @@ pub fn paint_player_chip(
             painter.add(s.as_shape(rect, CornerRadius::same(r)));
         }
     }
-    // A white edge keeps chips distinct on the green court (and green chips on it).
-    painter.rect(rect, CornerRadius::same(r), base, Stroke::new(2.0, Color32::from_white_alpha(225)), StrokeKind::Inside);
+    paint_skill_fill(painter, pal, rect, r, skill, finish_variant(name));
+    // A white edge keeps chips distinct on the court.
+    if !crowns {
+        painter.rect_stroke(rect, CornerRadius::same(r), Stroke::new(2.0, Color32::from_white_alpha(225)), StrokeKind::Inside);
+    }
     if highlight {
         painter.rect_stroke(rect.expand(3.0), CornerRadius::same(r + 3), Stroke::new(3.0, pal.brand_fg), StrokeKind::Outside);
     }
@@ -343,7 +417,9 @@ pub fn paint_player_chip(
         // Sizes are rounded so a chip in flight doesn't rasterize a new font size
         // every frame.
         Some(detail) if h >= 40.0 => {
-            let name_max = font_size.min((h * 0.42).round());
+            // Crowns sit on their own line above the name.
+            let crown = if crowns { (h * 0.2).round().clamp(12.0, 22.0) } else { 0.0 };
+            let name_max = font_size.min((h * if crowns { 0.34 } else { 0.42 }).round());
             let size = fit(painter, name, theme::semibold, name_max, text_rect.width());
             let small = (h * 0.15).round().clamp(10.0, 14.0);
             let small = fit(painter, detail, theme::regular, small, text_rect.width());
@@ -352,19 +428,51 @@ pub fn paint_player_chip(
             let sub_line = painter.layout_no_wrap(detail.to_owned(), regular(small), fg.gamma_multiply(0.85));
             // Tuck the second line up under the name (line boxes have slack below the baseline).
             let gap = -(size * 0.14).round();
-            let total = top_line.size().y + gap + sub_line.size().y;
+            let crown_h = if crowns { crown + (size * 0.05).round() } else { 0.0 };
+            let total = crown_h + top_line.size().y + gap + sub_line.size().y;
             // Line boxes carry space above the capitals and below the baseline;
             // nudge up so the visible ink is what's centred.
-            let y = (rect.center().y - total / 2.0 - size * 0.1).round();
+            let mut y = (rect.center().y - total / 2.0 - size * 0.1).round();
             let cx = text_rect.center().x;
+            if crowns {
+                paint_crowns(painter, pal, pos2(cx, y + crown / 2.0 + size * 0.1), skill, crown);
+                y += crown_h;
+            }
             let sub_y = y + top_line.size().y + gap;
-            painter.galley(pos2(cx - top_line.size().x / 2.0, y), top_line, fg);
-            painter.galley(pos2(cx - sub_line.size().x / 2.0, sub_y), sub_line, fg);
+            let name_pos = pos2(cx - top_line.size().x / 2.0, y);
+            let sub_pos = pos2(cx - sub_line.size().x / 2.0, sub_y);
+            text_shadow(painter, fg, name_pos, &top_line);
+            text_shadow(painter, fg, sub_pos, &sub_line);
+            painter.galley(name_pos, top_line, fg);
+            painter.galley(sub_pos, sub_line, fg);
+        }
+        _ if crowns => {
+            // Name with its crowns after it, centred together.
+            let crown = (font_size * 0.7).round();
+            let cw = crowns_width(painter, skill, crown) + crown * 0.4;
+            let size = fit(painter, name, theme::semibold, font_size, text_rect.width() - cw);
+            let line = painter.layout_no_wrap(name.to_owned(), semibold(size), fg);
+            let left = text_rect.center().x - (line.size().x + cw) / 2.0;
+            let top = text_rect.center().y - line.size().y / 2.0;
+            let name_w = line.size().x;
+            painter.galley(pos2(left, top), line, fg);
+            paint_crowns(painter, pal, pos2(left + name_w + cw / 2.0 + crown * 0.2, text_rect.center().y), skill, crown);
         }
         _ => {
             let size = fit(painter, name, theme::semibold, font_size, text_rect.width());
-            painter.text(text_rect.center(), Align2::CENTER_CENTER, name, semibold(size), fg);
+            let line = painter.layout_no_wrap(name.to_owned(), semibold(size), fg);
+            let pos = text_rect.center() - line.size() / 2.0;
+            text_shadow(painter, fg, pos, &line);
+            painter.galley(pos, line, fg);
         }
+    }
+}
+
+/// A faint light edge under dark text on a colored chip, as if pressed into
+/// the finish.
+fn text_shadow(painter: &egui::Painter, fg: Color32, pos: Pos2, galley: &std::sync::Arc<egui::Galley>) {
+    if theme::skill_style() == SkillStyle::Colors && fg.r() < 100 && fg.g() < 100 && fg.b() < 100 {
+        painter.galley_with_override_text_color(pos + vec2(0.0, 1.0), galley.clone(), Color32::from_white_alpha(70));
     }
 }
 
@@ -484,4 +592,262 @@ pub fn short_duration(ms: i64) -> String {
 
 pub fn unique(id: impl std::hash::Hash + std::fmt::Debug) -> Id {
     Id::unique(("goodminton", id))
+}
+
+// ===========================================================================
+// Skill styles: Colors (polished color finish) and Crowns (plain + crowns).
+
+use crate::model::SkillStyle;
+use egui::epaint::RectShape;
+
+/// Sheen variants per level, so a court full of the same level doesn't look stamped.
+pub const FINISH_VARIANTS: usize = 6;
+
+static FINISHES: std::sync::OnceLock<Vec<egui::TextureHandle>> = std::sync::OnceLock::new();
+
+/// Generate the polished finishes (every level × variant) once at start-up.
+pub fn load_skill_finishes(ctx: &egui::Context) {
+    FINISHES.get_or_init(|| {
+        let opts = egui::TextureOptions {
+            magnification: egui::TextureFilter::Linear,
+            minification: egui::TextureFilter::Linear,
+            ..Default::default()
+        };
+        Skill::ALL
+            .iter()
+            .flat_map(|&skill| (0..FINISH_VARIANTS).map(move |v| (skill, v)))
+            .map(|(skill, v)| ctx.load_texture(format!("finish-{}-{v}", skill.label()), finish_image(skill, v), opts))
+            .collect()
+    });
+}
+
+fn finish_texture(skill: Skill, variant: usize) -> Option<egui::TextureId> {
+    FINISHES
+        .get()
+        .map(|m| m[skill.rank() as usize * FINISH_VARIANTS + variant % FINISH_VARIANTS].id())
+}
+
+/// A stable sheen variant for a name.
+pub fn finish_variant(name: &str) -> usize {
+    // FNV-1a: cheap and stable across runs.
+    let h = name.bytes().fold(0x811C_9DC5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193));
+    (h >> 8) as usize % FINISH_VARIANTS
+}
+
+fn hash01(n: u32) -> f32 {
+    let mut x = n.wrapping_mul(0x9E37_79B9) ^ 0x85EB_CA6B;
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x2C1B_3C6D);
+    x ^= x >> 12;
+    x = x.wrapping_mul(0x297A_2D39);
+    x ^= x >> 15;
+    (x & 0xFFFF) as f32 / 65535.0
+}
+
+fn rgb_to_hsv([r, g, b]: [f32; 3]) -> [f32; 3] {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let d = max - min;
+    let h = if d <= 0.0 {
+        0.0
+    } else if max == r {
+        ((g - b) / d).rem_euclid(6.0)
+    } else if max == g {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    } / 6.0;
+    [h, if max > 0.0 { d / max } else { 0.0 }, max]
+}
+
+fn hsv_to_rgb([h, s, v]: [f32; 3]) -> [f32; 3] {
+    let h = h.rem_euclid(1.0) * 6.0;
+    let c = v * s;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r, g, b) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    [r + m, g + m, b + m]
+}
+
+/// A polished swatch in the level's color: a bright top lip, a soft horizon,
+/// light bouncing back at the bottom and fine brushed streaks. The glints
+/// aren't white: they lift the exposure and swing the hue, like light on
+/// anodised metal. Each variant places its glints, angle, hotspot and hue
+/// swing differently.
+fn finish_image(skill: Skill, variant: usize) -> egui::ColorImage {
+    const W: usize = 256;
+    const H: usize = 64;
+    let tones = theme::skill_tones(skill).map(|c| [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0]);
+    let [hi, body, lo] = tones;
+    let mix = |a: [f32; 3], b: [f32; 3], t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+    let ramp = |t: f32| {
+        let t = t.clamp(0.0, 1.0);
+        if t < 0.5 { mix(lo, body, t * 2.0) } else { mix(body, hi, (t - 0.5) * 2.0) }
+    };
+    let smooth = |t: f32| {
+        let t = t.clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    // Per-variant randomness, stable for a given level and variant.
+    let seed = (skill.rank() as u32 + 1) * 977 + variant as u32 * 131;
+    let rnd = |k: u32| hash01(seed.wrapping_add(k.wrapping_mul(7919)));
+    let horizon = 0.48 + rnd(1) * 0.14;
+    let lean = (rnd(2) - 0.5) * 0.5;
+    // Which way the hue swings: alternate so neighbours differ.
+    let swing = if variant % 2 == 0 { 1.0 } else { -1.0 } * (0.03 + rnd(3) * 0.035);
+    let bands = 2 + (rnd(4) * 2.0) as u32;
+    let glints: Vec<(f32, f32, f32, f32)> = (0..bands)
+        .map(|i| {
+            let k = 10 + i * 5;
+            let center = 0.08 + rnd(k) * 0.84;
+            let width = 0.012 + rnd(k + 1) * 0.05;
+            let strength = 0.35 + rnd(k + 2) * 0.45;
+            let hue = swing * (0.6 + rnd(k + 3) * 0.8);
+            (center, width, strength, hue)
+        })
+        .collect();
+    let (hx, hy, hr) = (0.1 + rnd(30) * 0.8, rnd(31) * 0.6, 0.18 + rnd(32) * 0.2);
+
+    let mut pixels = Vec::with_capacity(W * H);
+    for y in 0..H {
+        let v = (y as f32 + 0.5) / H as f32;
+        let profile = if v < horizon {
+            0.92 - 0.34 * smooth(v / horizon)
+        } else {
+            0.58 + 0.26 * smooth((v - horizon) / (1.0 - horizon))
+        };
+        let streak = (hash01(seed ^ (y as u32 * 31 + 5)) - 0.5) * 0.05;
+        for x in 0..W {
+            let u = (x as f32 + 0.5) / W as f32;
+            let grain = (hash01(seed ^ ((y * W + x) as u32 + 7)) - 0.5) * 0.015;
+            let base = ramp(profile + streak + grain);
+            // Light: glint bands lean across the chip, plus a soft hotspot.
+            let mut lift = 0.0;
+            let mut hue = 0.0;
+            for &(c, w, k, h) in &glints {
+                let d = u - c - lean * (1.0 - v);
+                let g = (-(d / w).powi(2)).exp() * k;
+                lift += g;
+                hue += g * h;
+            }
+            // Width is 4× height, so stretch the hotspot horizontally to stay round.
+            let (dx, dy) = ((u - hx) * 4.0, v - hy);
+            let spot = (-(dx * dx + dy * dy) / (hr * hr)).exp() * 0.3;
+            lift += spot;
+            hue += spot * swing * 0.5;
+            if v < 0.2 {
+                lift += (1.0 - v / 0.2).powi(2) * 0.35;
+            }
+            let [h, sat, val] = rgb_to_hsv(base);
+            let lift = lift.min(1.2);
+            let shifted = [
+                h + hue,
+                // Brighter, a touch less saturated — but never washed out to white.
+                (sat * (1.0 - 0.22 * lift)).max(sat * 0.55),
+                (val * (1.0 + 0.32 * lift)).min(1.0),
+            ];
+            let [r, g, b] = hsv_to_rgb(shifted);
+            pixels.push(Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8));
+        }
+    }
+    egui::ColorImage::new([W, H], pixels)
+}
+
+/// A four-point twinkle (two crossed diamonds).
+fn paint_sparkle(painter: &egui::Painter, c: Pos2, r: f32, color: Color32) {
+    let thin = r * 0.22;
+    for (a, b) in [(vec2(r, 0.0), vec2(0.0, thin)), (vec2(0.0, r), vec2(thin, 0.0))] {
+        painter.add(egui::Shape::convex_polygon(vec![c - a, c + b, c + a, c - b], color, Stroke::NONE));
+    }
+}
+
+/// The background of a chip or tag in the current skill style.
+pub fn paint_skill_fill(painter: &egui::Painter, pal: &Palette, rect: Rect, radius: u8, skill: Skill, variant: usize) {
+    match theme::skill_style() {
+        SkillStyle::Colors => {
+            let [_, body, lo] = theme::skill_tones(skill);
+            match finish_texture(skill, variant) {
+                Some(tex) => {
+                    let uv = Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0));
+                    painter.add(RectShape::filled(rect, CornerRadius::same(radius), Color32::WHITE).with_texture(tex, uv));
+                }
+                None => {
+                    painter.rect_filled(rect, CornerRadius::same(radius), body);
+                }
+            }
+            painter.rect_stroke(rect, CornerRadius::same(radius), Stroke::new(1.0, lo.gamma_multiply(0.7)), StrokeKind::Inside);
+            if skill == Skill::Expert && rect.height() >= 24.0 {
+                let r = (rect.height() * 0.11).clamp(4.0, 9.0);
+                paint_sparkle(painter, pos2(rect.right() - r * 2.2, rect.top() + r * 2.0), r, Color32::from_white_alpha(235));
+            }
+        }
+        SkillStyle::Crowns => {
+            painter.rect(rect, CornerRadius::same(radius), pal.bg1, Stroke::new(1.0, pal.stroke1), StrokeKind::Inside);
+        }
+    }
+}
+
+/// Text color on a chip in the current skill style.
+pub fn skill_text_color(pal: &Palette, skill: Skill) -> Color32 {
+    match theme::skill_style() {
+        SkillStyle::Crowns => pal.fg1,
+        _ => theme::on_skill_color(skill),
+    }
+}
+
+/// A row of crowns (one per level), centred on `center`. Returns its rect.
+pub fn paint_crowns(painter: &egui::Painter, pal: &Palette, center: Pos2, skill: Skill, size: f32) -> Rect {
+    let text = theme::icon::CROWN_F.repeat(theme::crown_count(skill));
+    painter.text(center, Align2::CENTER_CENTER, text, icon_font(size), theme::crown_color(pal))
+}
+
+/// Width of a crown row at this size.
+pub fn crowns_width(painter: &egui::Painter, skill: Skill, size: f32) -> f32 {
+    let text = theme::icon::CROWN_F.repeat(theme::crown_count(skill));
+    painter.layout_no_wrap(text, icon_font(size), Color32::WHITE).size().x
+}
+
+/// The bar that leads a name in a list (Colors). Crowns have no lead mark —
+/// they follow the name instead — so this returns false for them.
+pub fn paint_skill_lead(painter: &egui::Painter, column: Rect, skill: Skill) -> bool {
+    match theme::skill_style() {
+        SkillStyle::Colors => {
+            painter.rect_filled(column, CornerRadius::same(2), theme::skill_color(skill));
+            true
+        }
+        SkillStyle::Crowns => false,
+    }
+}
+
+/// A skill mark as a widget, for menu headers: bar or crowns.
+pub fn skill_mark(ui: &mut Ui, pal: &Palette, skill: Skill) {
+    match theme::skill_style() {
+        SkillStyle::Crowns => {
+            let w = crowns_width(ui.painter(), skill, 14.0);
+            let (rect, _) = ui.allocate_exact_size(vec2(w, 22.0), Sense::hover());
+            paint_crowns(ui.painter(), pal, rect.center(), skill, 14.0);
+        }
+        SkillStyle::Colors => {
+            let (rect, _) = ui.allocate_exact_size(vec2(4.0, 22.0), Sense::hover());
+            paint_skill_lead(ui.painter(), rect, skill);
+        }
+    }
+}
+
+/// Menu entry text for a level: a dot in its color, or its crowns.
+pub fn skill_menu_text(pal: &Palette, skill: Skill) -> egui::RichText {
+    match theme::skill_style() {
+        SkillStyle::Crowns => {
+            let crowns = theme::icon::CROWN_F.repeat(theme::crown_count(skill));
+            egui::RichText::new(format!("{}  {crowns}", skill.label())).color(theme::crown_color(pal))
+        }
+        _ => egui::RichText::new(format!("●  {}", skill.label())).color(theme::skill_color(skill)),
+    }
 }

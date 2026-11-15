@@ -120,6 +120,7 @@ pub struct GoodmintonApp {
 impl GoodmintonApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_fonts(theme::fonts());
+        widgets::load_skill_finishes(&cc.egui_ctx);
         let (store, startup_error) = match Store::open_default() {
             Ok(store) => (store, None),
             Err(err) => {
@@ -326,6 +327,7 @@ impl eframe::App for GoodmintonApp {
         let now = now_ms();
         let settings = self.state.settings.clone();
         let pal = *Palette::get(settings.dark_mode);
+        theme::set_skill_style(settings.skill_style);
         if self.applied_theme != Some((settings.dark_mode, settings.ui_scale)) {
             theme::apply(&ctx, &pal);
             ctx.set_zoom_factor(settings.ui_scale);
@@ -471,6 +473,9 @@ impl GoodmintonApp {
             self.settings_open = show.contains("settings");
             self.roster_open = show.contains("roster");
             self.help = show.contains("help");
+            if show.contains("crowns") {
+                self.state.settings.skill_style = SkillStyle::Crowns;
+            }
             if show.contains("update") {
                 self.updater.debug_set(UpdateStatus::Available(Release {
                     version: "0.2.0".into(),
@@ -1186,13 +1191,24 @@ impl GoodmintonApp {
             p.text(pos2(x + 10.0, rect.center().y), Align2::CENTER_CENTER, rank.to_string(), regular(14.0), pal.fg3.gamma_multiply(alpha));
             x += 24.0;
         }
-        // Skill bar, then name and secondary text.
+        // Skill bar, then name and secondary text. Crowns follow the name instead.
         let bar = Rect::from_min_size(pos2(x + 2.0, rect.top() + 12.0), vec2(4.0, rect.height() - 24.0));
-        let bar_color = if dimmed { pal.stroke1 } else { theme::skill_color(skill) };
-        p.rect_filled(bar, CornerRadius::same(2), bar_color);
-        x += 16.0;
-        let name_font = widgets::fit_font(ui, &name, semibold, 16.0, rect.right() - x - 80.0);
-        p.text(pos2(x, rect.top() + 20.0), Align2::LEFT_CENTER, &name, semibold(name_font), pal.fg1.gamma_multiply(alpha));
+        let led = if dimmed && theme::skill_style() == SkillStyle::Colors {
+            p.rect_filled(bar, CornerRadius::same(2), pal.stroke1);
+            true
+        } else {
+            widgets::paint_skill_bar(p, bar, skill)
+        };
+        x += if led { 16.0 } else { 4.0 };
+        let crowns = if led { 0.0 } else { widgets::crowns_width(p, skill, 13.0) + 8.0 };
+        let name_font = widgets::fit_font(ui, &name, semibold, 16.0, rect.right() - x - 80.0 - crowns);
+        let name_rect = p.text(pos2(x, rect.top() + 20.0), Align2::LEFT_CENTER, &name, semibold(name_font), pal.fg1.gamma_multiply(alpha));
+        if !led {
+            let c = widgets::paint_crowns(p, pal, pos2(name_rect.right() + 8.0 + (crowns - 8.0) / 2.0, name_rect.center().y), skill, 13.0);
+            if dimmed {
+                p.rect_filled(c.expand(1.0), CornerRadius::ZERO, pal.bg1.gamma_multiply(0.5));
+            }
+        }
         let mut detail = self.since_played_label(id).unwrap_or_default();
         if skipping && !presence.resting {
             detail.push_str(" • sitting out");
@@ -1268,8 +1284,9 @@ impl GoodmintonApp {
                     .desired_width(f32::INFINITY);
                 let resp = ui.add(edit);
                 let entered = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
+                // Wraps to a second row when the labels carry crowns.
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                     for skill in Skill::ALL {
                         if widgets::skill_pill(ui, pal, skill, self.new_skill == skill, false).clicked() {
                             self.new_skill = skill;
@@ -1409,9 +1426,7 @@ impl GoodmintonApp {
             ui.set_min_width(170.0);
             for skill in Skill::ALL {
                 let selected = skill == player.skill;
-                let text = RichText::new(format!("●  {}", skill.label()))
-                    .color(theme::skill_color(skill))
-                    .font(semibold(15.0));
+                let text = widgets::skill_menu_text(pal, skill).font(semibold(15.0));
                 if ui.selectable_label(selected, text).clicked() {
                     if let Some(p) = self.state.players.get_mut(&id) {
                         p.skill = skill;
@@ -1582,6 +1597,9 @@ impl GoodmintonApp {
                 row(ui, "Dark theme", "Easier on the eyes on a big TV", &mut |ui| {
                     widgets::switch(ui, pal, &mut s.dark_mode);
                 });
+                row(ui, "Skill levels", "How each player's level is shown on cards and lists", &mut |ui| {
+                    widgets::segmented(ui, pal, &mut s.skill_style, &SkillStyle::ALL, SkillStyle::label);
+                });
                 row(ui, "Display scale", "Make everything larger or smaller", &mut |ui| {
                     let mut pct = (s.ui_scale * 100.0).round() as u32;
                     if widgets::stepper(ui, pal, &mut pct, 60, 250, 10, "%") {
@@ -1591,7 +1609,7 @@ impl GoodmintonApp {
 
                 widgets::hdivider(ui, pal);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Skill colors").font(regular(13.0)).color(pal.fg3));
+                    ui.label(RichText::new("Key").font(regular(13.0)).color(pal.fg3));
                     for skill in Skill::ALL {
                         widgets::skill_pill(ui, pal, skill, true, false);
                     }
@@ -1990,11 +2008,19 @@ impl GoodmintonApp {
                 let galley = ui.painter().layout_no_wrap(name.clone(), regular(14.0), pal.fg1);
                 let count = games.to_string();
                 let cw = ui.painter().layout_no_wrap(count.clone(), semibold(12.0), pal.fg2).size().x + 12.0;
-                let (r, _) = ui.allocate_exact_size(vec2(galley.size().x + 22.0 + cw + 8.0, 32.0), Sense::hover());
+                let crowned = theme::skill_style() == SkillStyle::Crowns;
+                let (lead, trail) = if crowned { (8.0, widgets::crowns_width(ui.painter(), *skill, 12.0) + 6.0) } else { (18.0, 0.0) };
+                let (r, _) = ui.allocate_exact_size(vec2(galley.size().x + lead + 4.0 + trail + cw + 8.0, 32.0), Sense::hover());
                 let p = ui.painter();
                 p.rect(r, CornerRadius::same(4), pal.bg2, Stroke::new(1.0, pal.stroke2), StrokeKind::Inside);
-                widgets::paint_skill_bar(p, Rect::from_min_size(r.left_top() + vec2(7.0, 7.0), vec2(4.0, r.height() - 14.0)), *skill);
-                p.galley(pos2(r.left() + 18.0, r.center().y - galley.size().y / 2.0), galley, pal.fg1);
+                let name_w = galley.size().x;
+                if !crowned {
+                    let column = Rect::from_min_size(r.left_top() + vec2(7.0, 7.0), vec2(4.0, r.height() - 14.0));
+                    widgets::paint_skill_bar(p, column, *skill);
+                } else {
+                    widgets::paint_crowns(p, pal, pos2(r.left() + lead + name_w + 6.0 + (trail - 6.0) / 2.0, r.center().y), *skill, 12.0);
+                }
+                p.galley(pos2(r.left() + lead, r.center().y - galley.size().y / 2.0), galley, pal.fg1);
                 widgets::paint_badge(p, pos2(r.right() - 5.0, r.center().y), Align2::RIGHT_CENTER, None, &count, 11.0, pal.subtle_selected, pal.fg2);
             }
         });
@@ -2109,8 +2135,8 @@ fn fmt_date(ms: i64, fmt: &str) -> String {
 
 const HELP_ROSTER: &str = "Everyone who has ever come to play — the list carries over from week to week. \
 When someone arrives, flip their switch on to check them in: they join the waiting list and their wait clock starts. \
-Flip it off when they leave. The colored letter is their skill level (Beginner, Intermediate, Advanced, Expert); \
-click it to change it. Double-click a name to fix its spelling. New people can be added at the top and are checked in straight away. \
+Flip it off when they leave. The small square is their skill level (Beginner, Intermediate, Advanced, Expert) — \
+shown as colors or crowns depending on Settings; click it to change it. Double-click a name to fix its spelling. New people can be added at the top and are checked in straight away. \
 “New game day” saves today into History and checks everyone out, ready for next week. \
 The app also does this by itself if it has been left alone for 8 hours. \
 Right-click any name for more options, including deleting a player.";
@@ -2197,8 +2223,7 @@ impl GoodmintonApp {
             ui.set_max_width(280.0);
             ui.spacing_mut().button_padding = vec2(10.0, 7.0);
             ui.horizontal(|ui| {
-                let (bar, _) = ui.allocate_exact_size(vec2(4.0, 22.0), Sense::hover());
-                widgets::paint_skill_bar(ui.painter(), bar, skill);
+                widgets::skill_mark(ui, pal, skill);
                 ui.label(RichText::new(&name).font(semibold(15.0)).color(pal.fg1));
             });
             let status = if !here {
@@ -2244,7 +2269,7 @@ impl GoodmintonApp {
                 |ui| {
                     ui.set_min_width(170.0);
                     for s in Skill::ALL {
-                        let text = RichText::new(format!("●  {}", s.label())).color(theme::skill_color(s)).font(semibold(15.0));
+                        let text = widgets::skill_menu_text(pal, s).font(semibold(15.0));
                         if ui.selectable_label(s == skill, text).clicked() && s != skill {
                             chosen = Some(PlayerAction::Skill(s));
                         }
