@@ -104,6 +104,14 @@ command ribbon over floating cards on a neutral canvas, in light or dark.
   `tools/build_icons.py` (needs `fonttools`), then copy the printed constants into `src/theme.rs`.
   Then run `tools/shuttle_glyph.py assets/fonts/FluentIcons-DropIn.ttf`: Fluent has no
   shuttlecock, so it draws one over the `SHUTTLE`/`SHUTTLE_F` slots.
+- **Windows graphics:** some PCs have graphics drivers that crash the moment they're
+  loaded (an old Intel OpenGL driver did). So on Windows the .exe starts the app as a
+  child process with one graphics setup at a time (Direct3D 12, Direct3D 12 in
+  software, Vulkan, OpenGL) until one opens a window, and remembers it in
+  `graphics.txt` in the data folder (`src/launch.rs`). Fatal errors are written to
+  `crash.log` there too, and shown in a message box. Every release is started on a
+  clean Windows machine first (`tools/smoke.ps1`); the "Windows smoke test" workflow
+  also fakes a driver crash to check the fallback.
 - **App icon:** a Liquid Glass shuttlecock on a blue tile. `tools/glass_icon.py` draws it
   as `assets/icon/app.svg` and renders the 1024 px master `app-1024.png` with headless
   Chrome; `tools/build_app_icon.py` then makes the .exe icon (`app.ico`) and the window

@@ -35,7 +35,7 @@ jobs:
           if ($LASTEXITCODE) { exit 1 }
           # Proof Direct3D 12 died before choosing an adapter, rather than failing cleanly.
           $log = Join-Path $env:APPDATA 'drop-in-badminton\drop-in-badminton\data\crash.log'
-          if (Select-String -Path $log -Pattern 'no dx12' -Quiet -ErrorAction SilentlyContinue) { 'FAILED: dx12 was not crashed'; exit 1 }
+          if ((Test-Path $log) -and (Select-String -Path $log -Pattern 'no dx12' -Quiet)) { 'FAILED: dx12 was not crashed'; exit 1 }
 
       - uses: actions/upload-artifact@v4
         if: always()
