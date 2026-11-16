@@ -689,10 +689,11 @@ pub fn paint_badge(
     painter.rect_filled(rect, CornerRadius::same(4), bg);
     let mut x = rect.left() + size * 0.55;
     if let Some(icon) = icon {
-        painter.text(pos2(x + size * 0.5, rect.center().y), Align2::CENTER_CENTER, icon, icon_font(size * 1.1), fg);
+        // Icon glyphs sit high in their line box and text sits low; meet in the middle.
+        painter.text(pos2(x + size * 0.5, rect.center().y + size * 0.1), Align2::CENTER_CENTER, icon, icon_font(size * 1.1), fg);
         x += icon_w;
     }
-    painter.galley(pos2(x, rect.center().y - galley.size().y / 2.0), galley, fg);
+    painter.galley(pos2(x, rect.center().y - galley.size().y / 2.0 - size * 0.1), galley, fg);
     rect
 }
 

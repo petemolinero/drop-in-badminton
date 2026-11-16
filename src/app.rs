@@ -131,6 +131,8 @@ pub struct DropInApp {
     waiting_search: String,
     /// What's typed in the clock's right-click panel.
     time_edit: String,
+    /// The session clock's edit box.
+    session_edit: String,
     /// Player being renamed, the edit buffer, and whether the box still needs focus.
     renaming: Option<(PlayerId, String, bool)>,
     snackbar: Option<Snackbar>,
@@ -196,6 +198,7 @@ impl DropInApp {
             search: String::new(),
             waiting_search: String::new(),
             time_edit: String::new(),
+            session_edit: String::new(),
             renaming: None,
             snackbar: None,
             confirm: None,
@@ -568,6 +571,10 @@ impl DropInApp {
                 }));
                 self.update_open = !show.contains("ribbon");
             }
+            if show.contains("sessiontime") {
+                self.session_edit = "0:30:00".into();
+                egui::Popup::open_id(ctx, unique("session-time"));
+            }
             if show.contains("light") {
                 self.state.settings.dark_mode = false;
             }
@@ -733,10 +740,14 @@ impl DropInApp {
             resp
         };
         let menu_btn = button(ui, rect.right(), "session-edit").on_hover_text("Session date & time, or a new session");
-        ui.painter().text(menu_btn.rect.center(), Align2::CENTER_CENTER, icon::EDIT, icon_font(18.0), pal.fg2);
+        ui.painter().text(menu_btn.rect.center() + vec2(0.0, 1.0), Align2::CENTER_CENTER, icon::EDIT, icon_font(18.0), pal.fg2);
         egui::Popup::menu(&menu_btn).id(unique("session-menu")).show(|ui| {
             ui.set_min_width(220.0);
             ui.spacing_mut().button_padding = vec2(10.0, 7.0);
+            if ui.button(RichText::new(format!("{}  Adjust session time…", icon::TIMER)).font(regular(15.0))).clicked() {
+                self.session_edit = hms(clock.elapsed(wall_ms()));
+                egui::Popup::open_id(ui.ctx(), unique("session-time"));
+            }
             if ui.button(RichText::new(format!("{}  Change date & time…", icon::CALENDAR)).font(regular(15.0))).clicked() {
                 self.session_form = Some(SessionForm::at(start, false, false));
             }
@@ -750,18 +761,68 @@ impl DropInApp {
         if toggle.clicked() {
             self.toggle_session_clock();
         }
-        let elapsed = clock.elapsed(wall_ms()) / 1000;
-        let text = format!("{}:{:02}:{:02}", elapsed / 3600, elapsed / 60 % 60, elapsed % 60);
         let ink = if running { pal.fg1 } else { pal.warning_fg };
+        // Text sits low in its line box and icons sit high; these nudges put
+        // every piece's visual middle on the same line.
+        let galley = ui.painter().layout_no_wrap(hms(clock.elapsed(wall_ms())), semibold(16.0), ink);
+        let time = Rect::from_min_size(
+            pos2(toggle.rect.left() - 6.0 - galley.size().x, y - galley.size().y / 2.0 - 1.5),
+            galley.size(),
+        );
+        let time_resp = ui
+            .interact(time.expand(4.0), unique("session-time-text"), Sense::click())
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text("Change the session time");
+        if time_resp.hovered() {
+            ui.painter().rect_filled(time.expand2(vec2(6.0, 4.0)), CornerRadius::same(4), pal.subtle_hover);
+        }
+        ui.painter().galley(time.min, galley, ink);
+        if time_resp.clicked() || time_resp.secondary_clicked() {
+            self.session_edit = hms(clock.elapsed(wall_ms()));
+            egui::Popup::open_id(ui.ctx(), unique("session-time"));
+        }
+        self.session_time_menu(&time_resp, pal);
         let p = ui.painter();
-        // Digits sit a touch high in their line box; nudge them onto the centre line.
-        let time = p.text(pos2(toggle.rect.left() - 6.0, y + 1.0), Align2::RIGHT_CENTER, text, semibold(16.0), ink);
         if running {
-            p.text(pos2(time.left() - 8.0, y + 1.0), Align2::RIGHT_CENTER, "Session", regular(14.0), pal.fg3);
+            p.text(pos2(time.left() - 10.0, y - 1.0), Align2::RIGHT_CENTER, "Session", regular(14.0), pal.fg3);
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         } else {
-            widgets::paint_badge(p, pos2(time.left() - 10.0, y), Align2::RIGHT_CENTER, Some(icon::PAUSE), "Session paused", 13.0, pal.warning_subtle, pal.warning_fg);
+            widgets::paint_badge(p, pos2(time.left() - 12.0, y), Align2::RIGHT_CENTER, Some(icon::PAUSE), "Session paused", 13.0, pal.warning_subtle, pal.warning_fg);
         }
+    }
+
+    /// The session clock's edit panel (click the time, or the pencil menu):
+    /// type how long the session has been going.
+    fn session_time_menu(&mut self, anchor: &egui::Response, pal: &Palette) {
+        egui::Popup::from_response(anchor)
+            .id(unique("session-time"))
+            .open_memory(None)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .align(egui::RectAlign::BOTTOM_END)
+            .show(|ui| {
+                ui.set_width(220.0);
+                ui.spacing_mut().button_padding = vec2(10.0, 7.0);
+                ui.label(RichText::new("Session time").font(semibold(15.0)).color(pal.fg1));
+                ui.label(RichText::new("How long it's been going: h:mm, or h:mm:ss. Waits and the round timer stay as they are.").font(regular(13.0)).color(pal.fg3));
+                let edit = ui.add(
+                    egui::TextEdit::singleline(&mut self.session_edit)
+                        .font(regular(18.0))
+                        .margin(Margin::symmetric(10, 6))
+                        .desired_width(220.0),
+                );
+                if !edit.has_focus() && !edit.lost_focus() && ui.memory(|m| m.focused().is_none()) {
+                    edit.request_focus();
+                }
+                let typed = parse_hms(&self.session_edit);
+                let entered = edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                ui.add_space(4.0);
+                let set = ui.add_enabled_ui(typed.is_some(), |ui| widgets::button(ui, pal, ButtonKind::Primary, None, "Set time", 32.0)).inner;
+                if let Some(ms) = typed.filter(|_| set.clicked() || entered) {
+                    self.state.session.set_elapsed(ms, wall_ms());
+                    self.dirty = true;
+                    ui.close();
+                }
+            });
     }
 
     /// The session date-and-time form, for a new session or to move this one.
@@ -3138,6 +3199,27 @@ fn prune_backups(dir: &std::path::Path, keep: usize) {
 }
 
 /// "7", "7:30" or "0:45" as milliseconds (at most 2 hours).
+/// A session length as h:mm:ss.
+fn hms(ms: i64) -> String {
+    let s = ms.max(0) / 1000;
+    format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+}
+
+/// "90" (minutes), "1:30" (h:mm) or "1:30:15" (h:mm:ss), up to two days.
+fn parse_hms(text: &str) -> Option<i64> {
+    let parts: Vec<&str> = text.trim().split(':').map(str::trim).collect();
+    let num = |s: &str| if s.is_empty() { Some(0) } else { s.parse::<i64>().ok() };
+    let (h, m, s) = match parts.as_slice() {
+        [m] => (0, num(m)?, 0),
+        [h, m] => (num(h)?, num(m)?, 0),
+        [h, m, s] => (num(h)?, num(m)?, num(s)?),
+        _ => return None,
+    };
+    let ms = ((h * 60 + m) * 60 + s) * 1000;
+    let in_range = (parts.len() == 1 || m < 60) && s < 60 && (0..=48 * 3_600_000).contains(&ms);
+    in_range.then_some(ms)
+}
+
 fn parse_clock(text: &str) -> Option<i64> {
     let text = text.trim();
     let (m, s) = match text.split_once(':') {

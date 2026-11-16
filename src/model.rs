@@ -314,6 +314,16 @@ impl Session {
 
     /// Move the whole session in time by `delta` ms (a new start date or
     /// time): every timestamp shifts together, so durations don't change.
+    /// Set how long the session has been running, without changing anyone's
+    /// wait or the round timer: everything moves with the clock. The session's
+    /// start date and time stay put.
+    pub fn set_elapsed(&mut self, elapsed_ms: i64, wall: i64) {
+        let delta = elapsed_ms.max(0) - self.clock.elapsed(wall);
+        self.clock.elapsed_ms += delta;
+        self.shift(delta);
+        self.clock.start_ms -= delta;
+    }
+
     pub fn shift(&mut self, delta: i64) {
         self.clock.start_ms += delta;
         for p in self.present.values_mut() {
@@ -401,4 +411,22 @@ pub fn data_dir() -> PathBuf {
     directories::ProjectDirs::from("app", "drop-in-badminton", "drop-in-badminton")
         .map(|d| d.data_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_elapsed_keeps_the_round_timer_and_start() {
+        let wall = 1_000_000_000;
+        let mut s = Session { clock: SessionClock::starting(5_000_000, wall - 600_000), ..Default::default() };
+        let now = s.clock.now(wall);
+        s.timer = Timer::Running { end_ms: now + 60_000 };
+        s.set_elapsed(3_600_000, wall);
+        assert_eq!(s.clock.elapsed(wall), 3_600_000);
+        assert_eq!(s.clock.start_ms, 5_000_000);
+        let Timer::Running { end_ms } = s.timer else { panic!("timer stopped") };
+        assert_eq!(end_ms - s.clock.now(wall), 60_000);
+    }
 }
