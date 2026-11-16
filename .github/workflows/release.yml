@@ -45,6 +45,11 @@ jobs:
       - run: cargo test --release
       - run: cargo build --release
 
+      - name: Check it opens a window on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tools/smoke.ps1 -Exe target/release/drop-in-badminton.exe -Name release
+
       - name: Rename for upload
         shell: bash
         run: mkdir dist && cp "${{ matrix.built }}" "dist/${{ matrix.asset }}"

@@ -27,6 +27,16 @@ jobs:
         shell: pwsh
         run: ./tools/smoke.ps1 -Exe target/release/drop-in-badminton.exe -Name built
 
+      - name: This build, with the first graphics setup crashing like a broken driver
+        shell: pwsh
+        run: |
+          $env:DROP_IN_BADMINTON_FAKE_CRASH = 'dx12'
+          ./tools/smoke.ps1 -Exe target/release/drop-in-badminton.exe -Name fake-crash -Expect warp
+          if ($LASTEXITCODE) { exit 1 }
+          # Proof Direct3D 12 died before choosing an adapter, rather than failing cleanly.
+          $log = Join-Path $env:APPDATA 'drop-in-badminton\drop-in-badminton\data\crash.log'
+          if (Select-String -Path $log -Pattern 'no dx12' -Quiet -ErrorAction SilentlyContinue) { 'FAILED: dx12 was not crashed'; exit 1 }
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:

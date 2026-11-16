@@ -76,6 +76,10 @@ pub fn should_report() -> bool {
 pub fn wgpu_options() -> egui_wgpu::WgpuConfiguration {
     let mut config = egui_wgpu::WgpuConfiguration::default();
     let Some(gpu) = chosen() else { return config };
+    // Tests: die the way a broken driver does, without a word, to check the fallback.
+    if std::env::var("DROP_IN_BADMINTON_FAKE_CRASH").is_ok_and(|s| s == gpu.name()) {
+        std::process::abort();
+    }
     if let WgpuSetup::CreateNew(setup) = &mut config.wgpu_setup {
         // Only start the one backend: merely probing the others loads their drivers.
         setup.instance_descriptor.backends = match gpu {
