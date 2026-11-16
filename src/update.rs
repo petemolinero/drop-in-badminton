@@ -70,7 +70,7 @@ pub fn restart_if_requested() {
         return;
     }
     if let Some(Some(exe)) = EXE.get() {
-        if let Err(err) = std::process::Command::new(exe).spawn() {
+        if let Err(err) = std::process::Command::new(exe).env_remove(crate::launch::GPU_ENV).spawn() {
             eprintln!("drop-in-badminton: couldn't restart: {err}");
         }
     }

@@ -407,6 +407,9 @@ impl eframe::App for DropInApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.frame += 1;
+        if self.frame == 3 {
+            crate::launch::mark_launched();
+        }
         let now = self.state.now();
         let settings = self.state.settings.clone();
         let pal = *Palette::get(settings.dark_mode);

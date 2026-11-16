@@ -6,6 +6,7 @@
 mod app;
 mod engine;
 mod hall;
+mod launch;
 mod model;
 mod store;
 mod surfaces;
@@ -28,6 +29,9 @@ fn main() {
         let thread = std::thread::current().name().unwrap_or("unnamed").to_string();
         fail(&format!("crashed in thread '{thread}'{place}: {what}"));
     }));
+    if launch::supervise() {
+        return;
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Drop-in Badminton")
@@ -40,6 +44,7 @@ fn main() {
                 width: 256,
                 height: 256,
             })),
+        wgpu_options: launch::wgpu_options(),
         ..Default::default()
     };
     let result = eframe::run_native(
@@ -48,7 +53,7 @@ fn main() {
         Box::new(|cc| Ok(Box::new(app::DropInApp::new(cc)))),
     );
     if let Err(err) = result {
-        fail(&format!("couldn't start: {err}"));
+        fail(&format!("couldn't start ({}): {err}", launch::chosen().map_or("default graphics".into(), |g| format!("{g:?}"))));
         std::process::exit(1);
     }
     // After an update, start the new version once this one has saved and closed.
@@ -68,7 +73,7 @@ fn fail(what: &str) {
         let _ = writeln!(f, "{line}");
     }
     #[cfg(windows)]
-    if std::env::var_os("DROP_IN_BADMINTON_NO_DIALOG").is_none() {
+    if launch::should_report() && std::env::var_os("DROP_IN_BADMINTON_NO_DIALOG").is_none() {
         message_box(&format!(
             "Drop-in Badminton ran into a problem and has to close.\n\n{what}\n\nThis was saved to:\n{}",
             log.display()
