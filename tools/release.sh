@@ -30,4 +30,4 @@ git add Cargo.toml Cargo.lock
 git commit -m "Release v$version"
 git tag -a "v$version" -m "$notes"
 git push origin HEAD "v$version"
-echo "Pushed v$version — the build takes a few minutes: https://github.com/petemolinero/goodminton/actions"
+echo "Pushed v$version — the build takes a few minutes: https://github.com/petemolinero/drop-in-badminton/actions"

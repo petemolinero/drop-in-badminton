@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-pub const REPO: &str = "petemolinero/goodminton";
+pub const REPO: &str = "petemolinero/drop-in-badminton";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The release file built for this platform (see `.github/workflows/release.yml`).

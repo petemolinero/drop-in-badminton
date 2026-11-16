@@ -65,7 +65,7 @@ until the next round, so they don't get placed straight back.
 ## Installing and updating
 
 Download `goodminton-windows-x86_64.exe` from the
-[latest release](https://github.com/petemolinero/goodminton/releases/latest),
+[latest release](https://github.com/petemolinero/drop-in-badminton/releases/latest),
 put it somewhere permanent (e.g. a `Goodminton` folder in Documents) and make a
 desktop shortcut. Windows will warn once that the app is unrecognised (it isn't
 code-signed): click **More info → Run anyway**.
