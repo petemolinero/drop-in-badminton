@@ -98,7 +98,7 @@ impl Default for Settings {
             max_wait_minutes: 30,
             skill_matching: true,
             auto_start_timer: false,
-            dark_mode: true,
+            dark_mode: false,
             ui_scale: 1.0,
         }
     }
