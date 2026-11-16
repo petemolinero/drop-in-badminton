@@ -263,8 +263,9 @@ pub fn paint_court(p: &egui::Painter, tex: &Surfaces, dark: bool, index: usize, 
 
     // Game lines of the other sports painted on the gym floor, running on
     // under the mat. Each court gets a different piece of them.
-    let navy = paint(Color32::from_rgb(30, 66, 132));
-    let red = paint(Color32::from_rgb(186, 52, 46));
+    // Faded, like old paint under varnish, so they don't compete with the names.
+    let navy = paint(Color32::from_rgb(30, 66, 132)).gamma_multiply(0.35);
+    let red = paint(Color32::from_rgb(186, 52, 46)).gamma_multiply(0.35);
     let (sw, sh) = (surface.width(), surface.height());
     let across = |t: f32, color: Color32| {
         let y = snap(surface.top() + sh * t);

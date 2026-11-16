@@ -326,45 +326,63 @@ impl Palette {
     }
 }
 
-/// The chip color for each level: a brighter, lighter cut of the classic
-/// color, light enough for dark text on every level.
-fn chip_color(skill: Skill) -> Color32 {
-    match skill {
-        Skill::Beginner => hex(0xFFE04A),
-        Skill::Intermediate => hex(0xFF8A80),
-        Skill::Advanced => hex(0x6FD67A),
-        Skill::Expert => hex(0x6CB2FF),
+static DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Which theme the skill colors are for; set once per frame.
+pub fn set_dark(dark: bool) {
+    DARK.store(dark, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn dark() -> bool {
+    DARK.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Skill colors: Beginner yellow, Intermediate red, Advanced green, Expert
+/// blue. Light theme: bright, light fills for dark text. Dark theme: deep
+/// tinted fills for light text, so the cards glow rather than glare.
+pub fn chip_color(skill: Skill) -> Color32 {
+    match (skill, dark()) {
+        (Skill::Beginner, false) => hex(0xFFDF5E),
+        (Skill::Intermediate, false) => hex(0xFF9A94),
+        (Skill::Advanced, false) => hex(0x86DC8E),
+        (Skill::Expert, false) => hex(0x8EC3FF),
+        (Skill::Beginner, true) => hex(0xC9A227),
+        (Skill::Intermediate, true) => hex(0x9A2A2A),
+        (Skill::Advanced, true) => hex(0x1E6B2C),
+        (Skill::Expert, true) => hex(0x1F5AA6),
     }
 }
 
-/// The level's chip color as (highlight, body, shadow), for its polished finish.
+/// The level's chip color as (highlight, body, shadow).
 pub fn skill_tones(skill: Skill) -> [Color32; 3] {
     let body = chip_color(skill);
-    [lerp_color(body, Color32::WHITE, 0.35), body, lerp_color(body, Color32::BLACK, 0.22)]
+    [lerp_color(body, Color32::WHITE, 0.35), body, lerp_color(body, Color32::BLACK, 0.25)]
 }
 
-/// Classic skill colors: Beginner yellow, Intermediate red, Advanced green,
-/// Expert blue (from the Fluent shared color palette).
-fn classic_color(skill: Skill) -> Color32 {
+/// A strong version of each level's color, for dots and small marks.
+pub fn skill_color(skill: Skill) -> Color32 {
     match skill {
-        Skill::Beginner => hex(0xFCE100),
+        Skill::Beginner => hex(0xD9A800),
         Skill::Intermediate => hex(0xD13438),
-        Skill::Advanced => hex(0x107C10),
-        Skill::Expert => hex(0x0078D4),
+        Skill::Advanced => hex(0x1E9E3A),
+        Skill::Expert => hex(0x1C6FD6),
     }
 }
 
-/// A flat color that stands for the level in the current style (dots, menus).
-pub fn skill_color(skill: Skill) -> Color32 {
-    classic_color(skill)
-}
-
-/// Readable text on a skill-colored chip: a deep shade of the chip's own hue.
+/// Readable text on a skill-colored chip.
 pub fn on_skill_color(skill: Skill) -> Color32 {
+    if dark() {
+        return match skill {
+            Skill::Beginner => hex(0x2A1F00),
+            Skill::Intermediate => hex(0xFFE5E3),
+            Skill::Advanced => hex(0xE3FAE6),
+            Skill::Expert => hex(0xE3EFFF),
+        };
+    }
     match skill {
-        Skill::Beginner => hex(0x3D2A00),
+        Skill::Beginner => hex(0x3D2E00),
         Skill::Intermediate => hex(0x4A0D0D),
-        Skill::Advanced => hex(0x06301A),
+        Skill::Advanced => hex(0x0A3314),
         Skill::Expert => hex(0x0A2148),
     }
 }
