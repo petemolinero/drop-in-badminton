@@ -191,10 +191,12 @@ impl AppState {
     }
 
     /// Start a fresh game day: nobody is present and the courts are empty.
-    /// The roster carries over.
-    pub fn new_day(&mut self) {
+    /// The roster carries over. Its clock reads `start_ms` and starts running
+    /// at wall time `wall`.
+    pub fn new_day(&mut self, start_ms: i64, wall: i64) {
         self.session = Session::default();
-        self.sync_court_count(now_ms());
+        self.session.clock = SessionClock::starting(start_ms, wall);
+        self.sync_court_count(start_ms);
     }
 
     /// Log the game currently on court `c` as finished at `now`.
@@ -726,7 +728,7 @@ mod tests {
         s.end_day(30 * MIN);
         assert_eq!(s.session.games.len(), 2, "game in progress is logged at day end");
         assert_eq!(s.session.day_ended_ms, Some(30 * MIN));
-        s.new_day();
+        s.new_day(7 * 86_400_000, 0);
         assert!(s.session.present.is_empty() && s.session.games.is_empty());
         assert!(s.players.contains_key(&ids[0]), "roster carries over");
     }

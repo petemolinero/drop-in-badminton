@@ -1,14 +1,13 @@
 //! The courts as a lit 3D sports hall.
 //!
 //! Each court is seen from high behind one baseline: maple floor, the blue
-//! mat and its lines, the net, a back wall with floodlights, pools of light
-//! from the lamps overhead and their reflections in the varnish.
+//! mat and its lines, the net, a back wall, pools of light from the lamps
+//! overhead and the lights' reflections in the varnish.
 //!
 //! The still part of that picture is ray-cast in software, once per panel
 //! size and theme, on a worker thread, and kept as a texture — so a court
-//! costs one textured rectangle per frame. Only the moving things (the
-//! shuttle and the shimmer of the lights) are drawn live, projected through
-//! the same [`Camera`].
+//! costs one textured rectangle per frame. Only the shuttle in play is drawn
+//! live, projected through the same [`Camera`].
 //!
 //! World space is in metres: `x` across the court, `y` up, `z` along its
 //! length away from the viewer, with the net at `z = 0`.
@@ -32,8 +31,11 @@ const MAT_Z: f32 = HALF_L + 1.1;
 const WALL_Z: f32 = 10.6;
 /// The net posts stand just outside the doubles sidelines.
 const POST_X: f32 = HALF_W + 0.1;
-/// Floodlights on the back wall (x positions).
+/// Floodlights up by the back wall (x positions), out of sight: only their
+/// reflections in the floor show.
 const FLOODS: [f32; 3] = [-2.5, 0.0, 2.5];
+/// How far in front of the wall they hang.
+const FLOOD_OUT: f32 = 0.45;
 /// Lamps high overhead, out of sight: (x, z) of the pool each throws on the floor.
 const LAMPS: [(f32, f32); 16] = [
     (-5.2, -6.4), (-1.75, -6.4), (1.75, -6.4), (5.2, -6.4),
@@ -166,13 +168,6 @@ impl View {
         Self { cam, cards, window, top, net_h, flood_y }
     }
 
-    /// Where the floodlights appear, and how big (in points).
-    fn floods(&self) -> impl Iterator<Item = (Pos2, Vec2)> + '_ {
-        FLOODS.iter().map(|x| {
-            let (p, depth) = self.cam.project([*x, self.flood_y, WALL_Z]);
-            (p, self.cam.scale(depth))
-        })
-    }
 }
 
 // ===========================================================================
@@ -294,16 +289,15 @@ struct Mood {
     wall: V3,
     wall_ambient: f32,
     wash: f32,
-    flood: f32,
     vignette: f32,
 }
 
 impl Mood {
     fn new(dark: bool) -> Self {
         if dark {
-            Self { ambient: 0.17, pool: 0.6, side: 0.3, gloss: 1.0, haze: 0.13, wall: [0.075, 0.125, 0.19], wall_ambient: 0.34, wash: 1.25, flood: 0.85, vignette: 0.22 }
+            Self { ambient: 0.17, pool: 0.6, side: 0.3, gloss: 1.0, haze: 0.13, wall: [0.075, 0.125, 0.19], wall_ambient: 0.34, wash: 1.25, vignette: 0.22 }
         } else {
-            Self { ambient: 0.56, pool: 0.44, side: 0.85, gloss: 0.8, haze: 0.06, wall: [0.14, 0.31, 0.34], wall_ambient: 0.62, wash: 0.95, flood: 1.0, vignette: 0.14 }
+            Self { ambient: 0.56, pool: 0.44, side: 0.85, gloss: 0.8, haze: 0.06, wall: [0.14, 0.31, 0.34], wall_ambient: 0.62, wash: 0.95, vignette: 0.14 }
         }
     }
 }
@@ -339,6 +333,11 @@ impl Scene<'_> {
             col = self.wall(hit_t * d[0], cam.h + hit_t * d[1], hit_t / cam.fx, hit_t / cam.fy);
         }
         self.haze(&mut col, d, hit_t);
+        let mut hit_t = hit_t;
+        if let Some((t, c)) = self.solids(d, hit_t) {
+            hit_t = t;
+            col = c;
+        }
         let net_t = -cam.zc / d[2];
         if net_t < hit_t {
             self.net(&mut col, net_t * d[0], cam.h + net_t * d[1], net_t / cam.fx, net_t / cam.fy);
@@ -403,6 +402,7 @@ impl Scene<'_> {
         // The net's soft shadow, and the gloom where floor meets wall.
         let under_net = (-(z * z) / (0.3 * 0.3)).exp() * stripe(x, POST_X, 0.3);
         light *= 1.0 - 0.2 * under_net;
+        light *= 1.0 - self.post_shade(x, z);
         light *= 0.72 + 0.28 * smooth(0.0, 1.6, WALL_Z - z);
 
         // The lights mirrored in the varnish: long streaks toward the viewer.
@@ -419,7 +419,7 @@ impl Scene<'_> {
             }
         };
         for fx in FLOODS {
-            mirror([fx, self.flood_y, WALL_Z], m.flood, 0.026, 0.12);
+            mirror([fx, self.flood_y, WALL_Z - FLOOD_OUT], 0.9, 0.026, 0.12);
         }
         for (lx, lz) in LAMPS {
             mirror([lx, LAMP_Y, lz], 0.5, 0.03, 0.1);
@@ -451,24 +451,39 @@ impl Scene<'_> {
             let down = (ly / d2.sqrt()).max(0.0);
             light += m.wash * 9.5 * off / d2.sqrt() * down.powi(4) / d2;
         }
-        let mut col = albedo.map(|c| c * light);
+        let col = albedo.map(|c| c * light);
 
-        // The floodlights: a housing, three bright cells, and their glare.
-        for fx in FLOODS {
-            let (dx, dy) = (x - fx, y - self.flood_y);
-            let housing = stripe(dx, 0.6, fpx) * stripe(dy, 0.2, fpy);
-            col = mix(col, [0.03, 0.035, 0.04], housing);
-            for cell in [-0.38, 0.0, 0.38] {
-                let lit = stripe(dx - cell, 0.155, fpx) * stripe(dy, 0.13, fpy);
-                col = mix(col, [2.4, 2.3, 2.0], lit);
-            }
-            let r2 = dx * dx * 0.55 + dy * dy;
-            let glare = m.flood * (0.75 * (-r2 / 0.22).exp() + 0.2 * (-r2 / 2.4).exp());
-            for k in 0..3 {
-                col[k] += glare * WARM[k];
-            }
-        }
+        let _ = (fpx, fpy);
         col
+    }
+
+    /// How much the net posts shade the floor at a point: the dark under
+    /// each base, and the soft shadows the post throws away from the lamps
+    /// nearest it.
+    fn post_shade(&self, x: f32, z: f32) -> f32 {
+        let (px, dx) = (POST_X.copysign(x), x.abs() - POST_X);
+        if dx.abs() > 1.6 || z.abs() > 1.4 {
+            return 0.0;
+        }
+        let away = (dx.hypot(z) - BASE_R).max(0.0);
+        let mut lit = 1.0 - 0.6 * (-away / 0.09).exp();
+        let top = self.net_h;
+        for (lx, lz) in LAMPS {
+            let (ax, az) = (px - lx, -lz);
+            let far2 = ax * ax + az * az;
+            if far2 > 16.0 {
+                continue;
+            }
+            // The post's shadow is a line on the floor, pointing away from the lamp.
+            let reach = top / (LAMP_Y - top);
+            let (bx, bz) = (ax * reach, az * reach);
+            let t = (((x - px) * bx + z * bz) / (bx * bx + bz * bz)).clamp(0.0, 1.0);
+            let off = (x - px - bx * t).hypot(z - bz * t);
+            let soft = 0.05 + 0.1 * t;
+            let dark = 1.25 * (-far2 / 7.0).exp() * (1.0 - 0.5 * t);
+            lit *= 1.0 - dark * (1.0 - smooth(soft * 0.4, soft * 1.5, off));
+        }
+        1.0 - lit
     }
 
     /// Light caught in the air under each overhead lamp.
@@ -516,16 +531,197 @@ impl Scene<'_> {
         let band_y = (y - (top - tape)) / tape;
         let white = 0.82 + 0.16 * band_y.clamp(0.0, 1.0);
         *col = mix(*col, [white * lit, white * lit, 0.98 * white * lit], stripe(x, POST_X, fpx) * band(y, top - tape, top, fpy));
-        // The posts: round steel, lit from above.
-        for side in [-1.0, 1.0] {
-            let off = (x - side * POST_X) / 0.06;
-            let cov = stripe(x - side * POST_X, 0.06, fpx) * band(y, 0.0, top + 0.05, fpy);
-            let steel = (0.42 + 0.5 * (1.0 - (off + 0.3) * (off + 0.3)).max(0.0)) * lit;
-            *col = mix(*col, [steel, steel, steel * 1.04], cov);
-            let foot = stripe(x - side * POST_X, 0.2, fpx) * band(y, -0.03, 0.06, fpy);
-            *col = mix(*col, [0.16 * lit, 0.17 * lit, 0.19 * lit], foot);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Solid things: the net posts and the floodlights, traced as real geometry.
+// Each is a signed distance field, sphere-traced inside its bounding box.
+
+fn dot(a: V3, b: V3) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn norm(a: V3) -> V3 {
+    let l = dot(a, a).sqrt().max(1e-6);
+    a.map(|c| c / l)
+}
+
+/// The point `t` along the ray from `o` in direction `d`.
+fn along(o: V3, d: V3, t: f32) -> V3 {
+    [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t]
+}
+
+/// The overhead lamps, taken together: from high up, a little toward the viewer.
+fn key_light() -> V3 {
+    norm([0.15, 1.0, -0.35])
+}
+
+/// What a surface is made of.
+#[derive(Clone, Copy, PartialEq)]
+enum Stuff {
+    Steel,
+    Paint,
+    Rubber,
+}
+
+/// Distance to the nearest surface, and what that surface is.
+type Field = (f32, Stuff);
+
+fn nearer(a: Field, b: Field) -> Field {
+    if b.0 < a.0 { b } else { a }
+}
+
+/// A box about `c` with its edges rounded off by `r`.
+fn sd_box(p: V3, c: V3, half: V3, r: f32) -> f32 {
+    let q = [0, 1, 2].map(|k| (p[k] - c[k]).abs() - (half[k] - r));
+    let out = q.map(|v| v.max(0.0));
+    dot(out, out).sqrt() + q[0].max(q[1]).max(q[2]).min(0.0) - r
+}
+
+/// An upright rod on the y axis from `y0` to `y1`, its rims rounded by `round`.
+fn sd_rod(p: V3, r: f32, y0: f32, y1: f32, round: f32) -> f32 {
+    let dx = p[0].hypot(p[2]) - (r - round);
+    let dy = (p[1] - (y0 + y1) / 2.0).abs() - ((y1 - y0) / 2.0 - round);
+    dx.max(dy).min(0.0) + dx.max(0.0).hypot(dy.max(0.0)) - round
+}
+
+/// The radius and height of a post's round base.
+const BASE_R: f32 = 0.17;
+const BASE_H: f32 = 0.06;
+
+/// A net post about its foot, `x` pointing away from the court: a steel
+/// tube with a black head where the net's cord runs over, a tensioner on
+/// the outside, standing on a plain round base.
+fn post(p: V3, top: f32) -> Field {
+    [
+        (sd_rod(p, 0.052, top - 0.12, top + 0.055, 0.022), Stuff::Rubber),
+        (sd_box(p, [0.062, top - 0.52, 0.0], [0.034, 0.075, 0.03], 0.012), Stuff::Paint),
+        (sd_rod(p, BASE_R, 0.0, BASE_H, 0.025), Stuff::Paint),
+    ]
+    .into_iter()
+    .fold((sd_rod(p, 0.042, 0.0, top + 0.02, 0.004), Stuff::Steel), nearer)
+}
+
+/// The box a post and its base fit in.
+fn post_box(side: f32, top: f32) -> (V3, V3) {
+    let r = BASE_R + 0.02;
+    ([side * POST_X - r, 0.0, -r], [side * POST_X + r, top + 0.08, r])
+}
+
+/// Where the ray from `o` along `d` is inside the box `lo..hi`.
+fn span(o: V3, d: V3, (lo, hi): (V3, V3)) -> Option<(f32, f32)> {
+    let (mut near, mut far) = (0.0_f32, f32::INFINITY);
+    for k in 0..3 {
+        if d[k].abs() < 1e-9 {
+            if o[k] < lo[k] || o[k] > hi[k] {
+                return None;
+            }
+            continue;
+        }
+        let (t0, t1) = ((lo[k] - o[k]) / d[k], (hi[k] - o[k]) / d[k]);
+        near = near.max(t0.min(t1));
+        far = far.min(t0.max(t1));
+    }
+    (near <= far).then_some((near, far))
+}
+
+/// A ray's first meeting with a solid thing.
+struct Hit {
+    t: f32,
+    n: V3,
+    stuff: Stuff,
+    /// How open the surface is to the light around it (1 = fully).
+    open: f32,
+}
+
+/// Sphere-trace `field` along the unit ray `d` from `o`, between the two distances of `span`.
+fn trace(o: V3, d: V3, span: (f32, f32), field: impl Fn(V3) -> Field) -> Option<Hit> {
+    let mut t = span.0;
+    for _ in 0..72 {
+        let p = along(o, d, t);
+        let (dist, stuff) = field(p);
+        if dist < 0.002 {
+            // The field's slope is the surface normal.
+            let e = 0.003;
+            let mut n = [0.0; 3];
+            for s in [[1.0, -1.0, -1.0], [-1.0, -1.0, 1.0], [-1.0, 1.0, -1.0], [1.0, 1.0, 1.0]] {
+                let f = field(along(p, s, e)).0;
+                for k in 0..3 {
+                    n[k] += s[k] * f;
+                }
+            }
+            let n = norm(n);
+            // Crevices (between fins, under the weight) get less light.
+            let shut: f32 = [0.03, 0.09].iter().map(|h| (1.0 - field(along(p, n, *h)).0 / h).clamp(0.0, 1.0)).sum();
+            return Some(Hit { t, n, stuff, open: 1.0 - 0.42 * shut });
+        }
+        t += dist;
+        if t > span.1 {
+            break;
         }
     }
+    None
+}
+
+impl Scene<'_> {
+    /// A surface lit by the overhead lamps: light from the hall around it,
+    /// the lamps' direct light, and their highlights.
+    fn lit(&self, hit: &Hit, d: V3, level: f32) -> V3 {
+        let (albedo, shine, tight) = match hit.stuff {
+            Stuff::Steel => ([0.74, 0.755, 0.79], 1.0, 30.0),
+            Stuff::Paint => ([0.2, 0.21, 0.23], 0.4, 18.0),
+            Stuff::Rubber => ([0.04, 0.04, 0.045], 0.3, 24.0),
+        };
+        let (n, l) = (hit.n, key_light());
+        let v = d.map(|c| -c);
+        let h = norm([l[0] + v[0], l[1] + v[1], l[2] + v[2]]);
+        // A second row of lamps, off to the other side, for a rim of light.
+        let h2 = norm([v[0] - 0.55, v[1] + 0.75, v[2] + 0.35]);
+        let around = 0.26 + 0.2 * (0.5 + 0.5 * n[1]);
+        let diffuse = (around + 0.6 * dot(n, l).max(0.0)) * hit.open;
+        let spec = shine * hit.open * (dot(n, h).max(0.0).powf(tight) + 0.45 * dot(n, h2).max(0.0).powf(tight));
+        // Bare steel also mirrors the bright hall above it.
+        let sky = if hit.stuff == Stuff::Steel { 0.2 * smooth(-0.3, 0.9, n[1] + 0.5 * dot(n, v)) } else { 0.0 };
+        [0, 1, 2].map(|k| (albedo[k] * (diffuse + sky) + spec * WARM[k]) * level)
+    }
+
+    /// The nearest solid thing along the ray, closer than `limit`: how far,
+    /// and its colour.
+    fn solids(&self, d: V3, limit: f32) -> Option<(f32, V3)> {
+        let o = [0.0, self.cam.h, self.cam.zc];
+        // `d` is one unit of depth long; trace along its unit vector.
+        let len = dot(d, d).sqrt();
+        let dn = d.map(|c| c / len);
+        let m = &self.mood;
+        let mut best: Option<(f32, V3)> = None;
+        let mut limit = limit * len;
+        for side in [-1.0, 1.0] {
+            let Some(span) = span(o, dn, post_box(side, self.net_h)) else { continue };
+            let field = |p: V3| post([side * p[0] - POST_X, p[1], p[2]], self.net_h);
+            if let Some(hit) = trace(o, dn, (span.0, span.1.min(limit)), field) {
+                limit = hit.t;
+                best = Some((hit.t / len, self.lit(&hit, dn, (m.ambient + m.pool).min(1.0))));
+            }
+        }
+        best
+    }
+}
+
+/// Screen boxes (in picture pixels) around the solid things, where pixels
+/// are supersampled so thin posts and box edges stay smooth.
+fn solid_bounds(cam: &Camera, net_h: f32) -> Vec<Rect> {
+    let boxes = [-1.0, 1.0].into_iter().map(|s| post_box(s, net_h));
+    boxes
+        .map(|(lo, hi)| {
+            let mut r = Rect::NOTHING;
+            for k in 0..8 {
+                let p = [if k & 1 == 0 { lo[0] } else { hi[0] }, if k & 2 == 0 { lo[1] } else { hi[1] }, if k & 4 == 0 { lo[2] } else { hi[2] }];
+                r.extend_with(cam.project(p).0);
+            }
+            r.expand(2.0)
+        })
+        .collect()
 }
 
 /// Ray-cast the hall into a `w` × `h` picture.
@@ -540,6 +736,8 @@ fn render(w: usize, h: usize, view: &View, dark: bool, wood: &Wood) -> ColorImag
         wood,
         size: (w, h),
     };
+    let solids = solid_bounds(&cam, view.net_h);
+    let solids = &solids;
     let mut pixels = vec![Color32::BLACK; w * h];
     let threads = std::thread::available_parallelism().map_or(2, |n| n.get()).clamp(1, 8);
     let rows = h.div_ceil(threads).max(1);
@@ -550,7 +748,22 @@ fn render(w: usize, h: usize, view: &View, dark: bool, wood: &Wood) -> ColorImag
                 for (j, row) in chunk.chunks_mut(w).enumerate() {
                     let y = k * rows + j;
                     for (x, px) in row.iter_mut().enumerate() {
-                        let c = scene.pixel(x as f32 + 0.5, y as f32 + 0.5);
+                        let (sx, sy) = (x as f32 + 0.5, y as f32 + 0.5);
+                        let c = if solids.iter().any(|r| r.contains(pos2(sx, sy))) {
+                            // 3 × 3 samples, so edges of solid things are smooth.
+                            let mut sum = [0.0; 3];
+                            for j in 0..3 {
+                                for i in 0..3 {
+                                    let s = scene.pixel(sx + (i as f32 - 1.0) / 3.0, sy + (j as f32 - 1.0) / 3.0);
+                                    for k in 0..3 {
+                                        sum[k] += s[k] / 9.0;
+                                    }
+                                }
+                            }
+                            sum
+                        } else {
+                            scene.pixel(sx, sy)
+                        };
                         // Dithered, so the dark wall's gradients don't band.
                         let n = hash(x as u32, y as u32) - 0.5;
                         let q = |v: f32| (v * 255.0 + n).round().clamp(0.0, 255.0) as u8;
@@ -702,22 +915,13 @@ impl Hall {
         mesh.add_rect_with_uv(Rect::from_center_size(c, size), uv, color);
     }
 
-    /// The living part of the picture: the floodlights' shimmer and, while a
-    /// game is on, a shuttle in play. `t` is in seconds.
+    /// The living part of the picture: while a game is on, a shuttle in
+    /// play. `t` is in seconds.
     pub fn paint_live(&self, p: &egui::Painter, rect: Rect, view: &View, court: usize, t: f64, dark: bool, rally: bool) {
         let p = p.with_clip_rect(rect.intersect(p.clip_rect()));
         let origin = rect.min.to_vec2();
         let mut glow = egui::Mesh::with_texture(self.blob.id());
-        for (k, (c, scale)) in view.floods().enumerate() {
-            // Each lamp breathes on its own slow, slightly irregular beat.
-            let phase = court as f64 * 1.7 + k as f64 * 2.3;
-            let beat = (t * 0.83 + phase).sin() * 0.6 + (t * 2.9 + phase * 1.3).sin() * 0.4;
-            let a = (if dark { 0.2 } else { 0.15 }) * (0.55 + 0.45 * beat as f32);
-            let tint = Color32::from_rgba_premultiplied((255.0 * a) as u8, (240.0 * a) as u8, (205.0 * a) as u8, 0);
-            self.blob(&mut glow, c + origin, vec2(scale.x * 4.6, scale.y * 3.6), tint);
-        }
         if !rally {
-            p.add(Shape::mesh(glow));
             return;
         }
         let (at, ahead) = rally_at(court, t);
@@ -839,9 +1043,6 @@ mod tests {
             let below = at(60, 99);
             assert!(below.r() > below.b(), "dark={dark}: wood below the mat: {below:?}");
             assert!(floor.r() > floor.b(), "dark={dark}: {floor:?}");
-            // The floodlights are the brightest thing in the picture, up on the wall.
-            let (p, _) = view.floods().nth(1).unwrap();
-            assert!(at(p.x as usize, p.y as usize).r() > 240, "dark={dark}");
         }
     }
 

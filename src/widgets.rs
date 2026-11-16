@@ -149,8 +149,11 @@ pub fn paint_media_button(ui: &Ui, rect: Rect, resp: &Response, glyph: Media, bg
     let c = rect.center();
     let fill = lerp_color(bg, Color32::BLACK, st.0 * 0.12 + st.1 * 0.12);
     p.circle_filled(c, rect.width() / 2.0, fill);
-    let s = rect.width() * 0.34;
-    let ink = Color32::WHITE;
+    paint_media_glyph(p, c, rect.width() * 0.34, glyph, Color32::WHITE);
+}
+
+/// A play / pause / next symbol `s` tall, centred (optically) on `c`.
+pub fn paint_media_glyph(p: &egui::Painter, c: Pos2, s: f32, glyph: Media, ink: Color32) {
     let bar = |x: f32, w: f32| {
         p.rect_filled(Rect::from_center_size(pos2(x, c.y), vec2(w, s)), CornerRadius::same((w * 0.3) as u8), ink);
     };

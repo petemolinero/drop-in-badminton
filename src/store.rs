@@ -295,12 +295,12 @@ impl Store {
         if session.attendance.is_empty() && session.day_id.is_none() {
             return Ok(()); // Nothing has happened today yet.
         }
-        let started = session
-            .attendance
-            .iter()
-            .map(|a| a.in_ms)
-            .min()
-            .unwrap_or_else(now_ms);
+        // The session's chosen start (older sessions: the first check-in).
+        let started = if session.clock.is_set() {
+            session.clock.start_ms
+        } else {
+            session.attendance.iter().map(|a| a.in_ms).min().unwrap_or_else(wall_ms)
+        };
         let day_id = match session.day_id {
             Some(id) => {
                 tx.execute(
@@ -365,7 +365,7 @@ impl Store {
             // The day runs from the first check-in to the last game (not to when
             // the app noticed the day was over, which can be the next morning).
             "SELECT d.id,
-                    COALESCE((SELECT MIN(checked_in_at) FROM attendance a WHERE a.game_day_id = d.id), d.started_at),
+                    d.started_at,
                     CASE WHEN d.ended_at IS NULL THEN NULL
                          -- A game closed out the next morning still only lasted a round or so.
                          ELSE COALESCE((SELECT MAX(MIN(ended_at, started_at + 3600000)) FROM games g WHERE g.game_day_id = d.id), d.ended_at) END,
@@ -488,7 +488,7 @@ mod tests {
         // End the day and start a new one: last week's history stays put.
         s.end_day(20 * 60_000);
         store.save(&mut s).unwrap();
-        s.new_day();
+        s.new_day(7 * 86_400_000, 0);
         // Removing a player archives them but keeps the history.
         s.delete_player(ids[0], 0);
         s.move_player(ids[1], Target::Slot(Spot::Deck(0, 0)), 7 * 86_400_000);

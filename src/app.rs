@@ -44,8 +44,34 @@ enum PlayerAction {
 
 #[derive(Clone, Copy, PartialEq)]
 enum Confirm {
-    NewDay,
     Delete(PlayerId),
+}
+
+/// The session date-and-time form: for a new session, or to move this one.
+struct SessionForm {
+    date: String,
+    time: String,
+    /// Starting a new session (true) or changing this one's start (false).
+    new: bool,
+    /// Opened because the last session sat idle for hours.
+    idle: bool,
+}
+
+impl SessionForm {
+    fn at(ms: i64, new: bool, idle: bool) -> Self {
+        Self { date: fmt_date(ms, "%Y-%m-%d"), time: fmt_date(ms, "%-I:%M %p"), new, idle }
+    }
+
+    /// The typed date and time, if both make sense.
+    fn parse(&self) -> Option<i64> {
+        use chrono::TimeZone;
+        let date = chrono::NaiveDate::parse_from_str(self.date.trim(), "%Y-%m-%d").ok()?;
+        let t = self.time.trim().to_uppercase().replace('.', "");
+        let time = ["%I:%M %p", "%I:%M%p", "%I %p", "%I%p", "%H:%M"]
+            .iter()
+            .find_map(|f| chrono::NaiveTime::parse_from_str(&t, f).ok())?;
+        chrono::Local.from_local_datetime(&date.and_time(time)).earliest().map(|d| d.timestamp_millis())
+    }
 }
 
 /// Animated on-screen rectangle of a player's chip, so players glide between
@@ -77,8 +103,9 @@ struct HistoryView {
     detail: DayDetail,
 }
 
-/// Gap after which the app assumes it's a new game day.
-const NEW_DAY_GAP_MS: i64 = 8 * 3600 * 1000;
+/// A running session untouched this long (real time) was left on by mistake:
+/// its clock is stopped where it was last used.
+const IDLE_GAP_MS: i64 = 8 * 3600 * 1000;
 
 /// Space between cards on the canvas.
 const GAP: f32 = 10.0;
@@ -107,6 +134,8 @@ pub struct DropInApp {
     renaming: Option<(PlayerId, String, bool)>,
     snackbar: Option<Snackbar>,
     confirm: Option<Confirm>,
+    /// The new-session / session-time form.
+    session_form: Option<SessionForm>,
     /// A right-click menu choice, applied at the end of the frame.
     pending: Option<(PlayerId, PlayerAction)>,
     /// The rename dialog: player, edit buffer, and whether it still needs focus.
@@ -167,6 +196,7 @@ impl DropInApp {
             renaming: None,
             snackbar: None,
             confirm: None,
+            session_form: None,
             pending: None,
             rename_dialog: None,
             drag: None,
@@ -183,12 +213,11 @@ impl DropInApp {
             #[cfg(debug_assertions)]
             shot_requested: false,
         };
-        let now = now_ms();
+        let wall = wall_ms();
+        app.state.ensure_clock(wall);
+        let now = app.state.now();
         app.state.sync_court_count(now);
-        // A long gap since the last activity means it's a new game day.
-        if app.is_stale(now) {
-            app.start_new_day(&cc.egui_ctx, false);
-        }
+        app.stop_if_idle(&cc.egui_ctx, wall);
         let previous = app.store.swap_app_version(update::VERSION);
         if let Some(err) = startup_error {
             app.toast(&cc.egui_ctx, err);
@@ -199,9 +228,31 @@ impl DropInApp {
         app
     }
 
-    fn is_stale(&self, now: i64) -> bool {
+    /// A session left running for hours with nobody touching it (say, until
+    /// next week): stop its clock where it was last used, and offer a new one.
+    fn stop_if_idle(&mut self, ctx: &egui::Context, wall: i64) {
         let s = &self.state.session;
-        (s.day_id.is_some() || !s.present.is_empty()) && now - s.last_activity_ms > NEW_DAY_GAP_MS
+        let started = s.day_id.is_some() || !s.present.is_empty();
+        if !(s.clock.running() && started && wall - s.last_activity_ms > IDLE_GAP_MS) {
+            return;
+        }
+        let at = s.last_activity_ms;
+        self.state.session.clock.pause(at);
+        self.dirty = true;
+        self.session_form = Some(SessionForm::at(wall, true, true));
+        let _ = ctx;
+    }
+
+    /// Pause or resume the session clock (and with it, everything timed).
+    fn toggle_session_clock(&mut self) {
+        let wall = wall_ms();
+        let clock = &mut self.state.session.clock;
+        if clock.running() {
+            clock.pause(wall);
+        } else {
+            clock.resume(wall);
+        }
+        self.dirty = true;
     }
 
     fn save(&mut self) {
@@ -210,24 +261,29 @@ impl DropInApp {
         }
     }
 
-    /// Close out the current game day into history and start a fresh one.
-    /// The roster carries over; everyone starts checked out.
-    fn start_new_day(&mut self, ctx: &egui::Context, undoable: bool) {
-        let before = Box::new(self.state.clone());
-        let had_day = !self.state.session.attendance.is_empty();
-        self.state.end_day(now_ms());
+    /// Put the current session into History: games on court count as
+    /// finished and everyone is checked out.
+    fn close_session(&mut self) {
+        let now = self.state.now();
+        self.state.end_day(now);
         self.save();
-        self.state.new_day();
+    }
+
+    /// Close the current session and start a fresh one whose clock reads
+    /// `start_ms` and is running. The roster carries over; everyone starts
+    /// checked out.
+    fn start_session(&mut self, ctx: &egui::Context, start_ms: i64) {
+        let before = Box::new(self.state.clone());
+        self.close_session();
+        self.state.new_day(start_ms, wall_ms());
         self.save();
         self.dirty = false;
         self.roster_open = true;
-        if had_day || undoable {
-            self.snackbar = Some(Snackbar {
-                text: "New game day — check players in as they arrive".into(),
-                undo: undoable.then_some(before),
-                born: ctx.input(|i| i.time),
-            });
-        }
+        self.snackbar = Some(Snackbar {
+            text: format!("New session · {} — check players in as they arrive", fmt_date(start_ms, "%a, %b %-d, %-I:%M %p")),
+            undo: Some(before),
+            born: ctx.input(|i| i.time),
+        });
     }
 
     /// Apply a change with an undo snapshot and a snackbar message.
@@ -243,7 +299,7 @@ impl DropInApp {
     }
 
     fn next_round(&mut self, ctx: &egui::Context) {
-        let now = now_ms();
+        let now = self.state.now();
         let before = Box::new(self.state.clone());
         if self.state.next_round(now) {
             let n = self.state.session.round_number;
@@ -309,7 +365,7 @@ impl DropInApp {
     /// they checked in, if they haven't played yet) and games tonight. The one
     /// format used everywhere a checked-in player is shown.
     fn since_played_label(&self, id: PlayerId) -> Option<String> {
-        let ms = self.shown_wait_ms(id, now_ms())?;
+        let ms = self.shown_wait_ms(id, self.state.now())?;
         let games = match self.state.session.present.get(&id)?.games_tonight {
             1 => "1 game".to_owned(),
             g => format!("{g} games"),
@@ -347,7 +403,7 @@ impl eframe::App for DropInApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.frame += 1;
-        let now = now_ms();
+        let now = self.state.now();
         let settings = self.state.settings.clone();
         let pal = *Palette::get(settings.dark_mode);
         theme::set_dark(settings.dark_mode);
@@ -417,12 +473,11 @@ impl eframe::App for DropInApp {
         if let Some((id, action)) = self.pending.take() {
             self.apply_player_action(&ctx, id, action);
         }
-        if self.is_stale(now) && !matches!(self.state.session.timer, Timer::Running { .. }) {
-            self.start_new_day(&ctx, false);
-        }
+        self.stop_if_idle(&ctx, wall_ms());
+        self.session_form_ui(&ctx, &pal);
 
         if self.dirty {
-            self.state.session.last_activity_ms = now;
+            self.state.session.last_activity_ms = wall_ms();
             // Save a second after the change rather than in the same frame, so
             // the write never lands on the first frames of an animation.
             let t = ctx.input(|i| i.time);
@@ -514,7 +569,11 @@ impl DropInApp {
             // The frozen review data was checked in hours ago; make the night
             // look like it's 20-odd minutes old, as it would be in real use.
             {
-                let now = now_ms();
+                let wall = wall_ms();
+                self.state.session.clock = SessionClock { start_ms: wall - 30 * 60_000, elapsed_ms: 30 * 60_000, running_since: Some(wall) };
+                self.state.session.last_activity_ms = wall;
+                self.session_form = None;
+                let now = self.state.now();
                 for (k, p) in self.state.session.present.values_mut().enumerate() {
                     p.checked_in_ms = now - (14 + (k as i64 * 7) % 12) * 60_000;
                     p.last_played_ms = None;
@@ -524,7 +583,7 @@ impl DropInApp {
                 }
             }
             if show.contains("all") {
-                let now = now_ms();
+                let now = self.state.now();
                 let ids: Vec<PlayerId> = self.state.players.keys().copied().collect();
                 for id in ids {
                     self.state.check_in(id, now - 20 * 60_000);
@@ -535,13 +594,16 @@ impl DropInApp {
                 self.next_round(ctx);
             }
             if show.contains("timer") {
-                self.state.session.timer = Timer::Running { end_ms: now_ms() + 9 * 60_000 + 41_000 };
+                self.state.session.timer = Timer::Running { end_ms: self.state.now() + 9 * 60_000 + 41_000 };
             }
             if show.contains("done") {
-                self.state.session.timer = Timer::Running { end_ms: now_ms() - 1000 };
+                self.state.session.timer = Timer::Running { end_ms: self.state.now() - 1000 };
             }
             if show.contains("history") {
                 self.open_history();
+            }
+            if show.contains("paused") {
+                self.state.session.clock.pause(wall_ms());
             }
             if show.contains("rename") {
                 if let Some(id) = self.state.players.keys().next().copied() {
@@ -549,7 +611,7 @@ impl DropInApp {
                 }
             }
             if show.contains("confirm") {
-                self.confirm = Some(Confirm::NewDay);
+                self.session_form = Some(SessionForm::at(wall_ms(), true, false));
             }
             if show.contains("drag") {
                 self.drag = self.state.session.deck.first().and_then(|g| g[0]);
@@ -586,7 +648,7 @@ impl DropInApp {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
-        let now = now_ms();
+        let now = self.state.now();
         let (space, n, f11, undo, esc, f1) = ctx.input_mut(|i| {
             (
                 i.consume_key(egui::Modifiers::NONE, Key::Space),
@@ -641,17 +703,123 @@ impl DropInApp {
             [pos2(name.right() + 12.0, y - 8.0), pos2(name.right() + 12.0, y + 8.0)],
             Stroke::new(1.0, pal.stroke1),
         );
-        let s = &self.state.session;
-        let day_start = s.attendance.first().map_or(now, |a| a.in_ms);
+        let start = self.state.session.clock.start_ms;
         p.text(
             pos2(name.right() + 24.0, y),
             Align2::LEFT_CENTER,
-            format!("Game day · {}", fmt_date(day_start, "%A, %B %-d")),
+            format!("Session · {}", fmt_date(start, "%A, %B %-d · %-I:%M %p")),
             regular(14.0),
             pal.fg2,
         );
-
         let _ = now;
+
+        // Right: the session clock, which every wait and timer runs on. Laid
+        // out by hand from the right edge, everything centred on one line.
+        let clock = self.state.session.clock;
+        let running = clock.running();
+        let button = |ui: &mut Ui, right: f32, id: &str| {
+            let r = Rect::from_center_size(pos2(right - 15.0, y), Vec2::splat(30.0));
+            let resp = ui.interact(r, unique(id), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+            let fill = if resp.is_pointer_button_down_on() { pal.subtle_pressed } else if resp.hovered() { pal.subtle_hover } else { Color32::TRANSPARENT };
+            ui.painter().rect_filled(r, CornerRadius::same(4), fill);
+            resp
+        };
+        let menu_btn = button(ui, rect.right(), "session-edit").on_hover_text("Session date & time, or a new session");
+        ui.painter().text(menu_btn.rect.center(), Align2::CENTER_CENTER, icon::EDIT, icon_font(18.0), pal.fg2);
+        egui::Popup::menu(&menu_btn).id(unique("session-menu")).show(|ui| {
+            ui.set_min_width(220.0);
+            ui.spacing_mut().button_padding = vec2(10.0, 7.0);
+            if ui.button(RichText::new(format!("{}  Change date & time…", icon::CALENDAR)).font(regular(15.0))).clicked() {
+                self.session_form = Some(SessionForm::at(start, false, false));
+            }
+            if ui.button(RichText::new(format!("{}  New session…", icon::ADD)).font(regular(15.0))).clicked() {
+                self.session_form = Some(SessionForm::at(wall_ms(), true, false));
+            }
+        });
+        let (glyph, tip) = if running { (widgets::Media::Pause, "Pause the session: every clock stops") } else { (widgets::Media::Play, "Resume the session") };
+        let toggle = button(ui, menu_btn.rect.left() - 2.0, "session-toggle").on_hover_text(tip);
+        widgets::paint_media_glyph(ui.painter(), toggle.rect.center(), 13.0, glyph, if running { pal.fg2 } else { pal.brand_fg });
+        if toggle.clicked() {
+            self.toggle_session_clock();
+        }
+        let elapsed = clock.elapsed(wall_ms()) / 1000;
+        let text = format!("{}:{:02}:{:02}", elapsed / 3600, elapsed / 60 % 60, elapsed % 60);
+        let ink = if running { pal.fg1 } else { pal.warning_fg };
+        let p = ui.painter();
+        // Digits sit a touch high in their line box; nudge them onto the centre line.
+        let time = p.text(pos2(toggle.rect.left() - 6.0, y + 1.0), Align2::RIGHT_CENTER, text, semibold(16.0), ink);
+        if running {
+            p.text(pos2(time.left() - 8.0, y + 1.0), Align2::RIGHT_CENTER, "Session", regular(14.0), pal.fg3);
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+        } else {
+            widgets::paint_badge(p, pos2(time.left() - 10.0, y), Align2::RIGHT_CENTER, Some(icon::PAUSE), "Session paused", 13.0, pal.warning_subtle, pal.warning_fg);
+        }
+    }
+
+    /// The session date-and-time form, for a new session or to move this one.
+    fn session_form_ui(&mut self, ctx: &egui::Context, pal: &Palette) {
+        let Some(mut form) = self.session_form.take() else { return };
+        let mut open = true;
+        let mut go = None;
+        let parsed = form.parse();
+        let modal = Modal::new(unique("session-form"))
+            .frame(Self::dialog_frame(pal))
+            .backdrop_color(pal.scrim)
+            .show(ctx, |ui| {
+                ui.set_width(440.0);
+                let title = if form.new { "Start a new session" } else { "Session date & time" };
+                ui.label(RichText::new(title).font(semibold(20.0)));
+                ui.add_space(2.0);
+                let body = if form.idle {
+                    "The last session sat untouched for hours, so its clock is stopped where it was last used. Start a new one, or keep the last one (resume it from the clock at the top)."
+                } else if form.new {
+                    "This session goes into History (games still on court count as finished). Everyone starts checked out; your roster and settings are kept."
+                } else {
+                    "Moves the whole session: check-ins, games and the round timer shift together, so nobody's wait changes."
+                };
+                ui.label(RichText::new(body).font(regular(14.0)).color(pal.fg2));
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("Date").font(semibold(13.0)).color(pal.fg2));
+                        ui.add(egui::TextEdit::singleline(&mut form.date).hint_text("2026-11-15").font(regular(16.0)).margin(Margin::symmetric(10, 6)).desired_width(170.0));
+                    });
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("Start time").font(semibold(13.0)).color(pal.fg2));
+                        ui.add(egui::TextEdit::singleline(&mut form.time).hint_text("7:00 PM").font(regular(16.0)).margin(Margin::symmetric(10, 6)).desired_width(130.0));
+                    });
+                });
+                let hint = match parsed {
+                    Some(ms) => fmt_date(ms, "%A, %B %-d, %Y at %-I:%M %p"),
+                    None => "Date as YYYY-MM-DD, time like 7:00 PM or 19:00".to_owned(),
+                };
+                ui.label(RichText::new(hint).font(regular(13.0)).color(if parsed.is_some() { pal.fg3 } else { pal.warning_fg }));
+                ui.add_space(16.0);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let action = if form.new { "Start session" } else { "Save" };
+                    let ok = ui.add_enabled_ui(parsed.is_some(), |ui| widgets::button(ui, pal, ButtonKind::Primary, None, action, 34.0)).inner;
+                    if ok.clicked() {
+                        go = parsed;
+                    }
+                    let cancel = if form.idle { "Keep the last session" } else { "Cancel" };
+                    if widgets::button(ui, pal, ButtonKind::Secondary, None, cancel, 34.0).clicked() {
+                        open = false;
+                    }
+                });
+            });
+        if let Some(ms) = go {
+            if form.new {
+                self.start_session(ctx, ms);
+            } else {
+                let delta = ms - self.state.session.clock.start_ms;
+                self.act(ctx, format!("Session moved to {}", fmt_date(ms, "%a, %b %-d, %-I:%M %p")), |s| s.session.shift(delta));
+            }
+            return;
+        }
+        if open && !modal.should_close() {
+            self.session_form = Some(form);
+        }
     }
 
     fn ribbon(&mut self, ui: &mut Ui, pal: &Palette, now: i64) {
@@ -755,7 +923,7 @@ impl DropInApp {
         let remaining = self.state.timer_remaining_ms(now);
         let finished = self.state.timer_finished(now);
         let timer = self.state.session.timer;
-        let running = matches!(timer, Timer::Running { .. }) && !finished;
+        let running = matches!(timer, Timer::Running { .. }) && !finished && self.state.session.clock.running();
         let frac = if total > 0 { remaining as f32 / total as f32 } else { 0.0 };
 
         // Play / pause inside a progress ring.
@@ -808,6 +976,12 @@ impl DropInApp {
         if resp.clicked() {
             if advance {
                 self.next_round(&ctx);
+            } else if !self.state.session.clock.running() {
+                // Everything is stopped with the session: carry on.
+                self.toggle_session_clock();
+                if !matches!(timer, Timer::Running { .. }) {
+                    self.state.timer_toggle(self.state.now());
+                }
             } else {
                 self.state.timer_toggle(now);
                 self.dirty = true;
@@ -840,8 +1014,10 @@ impl DropInApp {
             ui.painter().text(pos2(x + w / 2.0, digits.center().y - 14.0), Align2::CENTER_CENTER, ch, semibold(size), color);
             x += w;
         }
+        let session_paused = !self.state.session.clock.running();
         let (status, glyph, bg, fg) = match (finished, timer) {
             (true, _) => ("Time!", icon::SHUTTLE_F, pal.warning_subtle, pal.warning_fg),
+            (_, Timer::Running { .. }) if session_paused => ("Session paused", icon::PAUSE, pal.warning_subtle, pal.warning_fg),
             (_, Timer::Running { .. }) => ("Playing", icon::SHUTTLE_F, pal.brand_subtle, pal.on_brand_subtle),
             (_, Timer::Paused { .. }) => ("Paused", icon::PAUSE, pal.subtle_selected, pal.fg2),
             (_, Timer::Idle) if self.state.session.round_number == 0 => ("Press Start round 1", icon::NEXT_F, pal.subtle_selected, pal.fg2),
@@ -937,22 +1113,25 @@ impl DropInApp {
             let playing = self.state.session.courts.iter().any(|c| c.iter().any(Option::is_some));
             let over = self.state.timer_finished(now);
             let t = p.text(pos2(now_band.left() + 4.0, now_band.center().y), Align2::LEFT_CENTER, "Now playing", semibold(20.0), pal.fg1);
+            let paused = !self.state.session.clock.running();
             let sub = match (playing, self.state.session.timer) {
+                _ if paused => "Session paused — every clock is stopped until you resume it",
                 _ if over && playing => "Time! Finish the point, shake hands, and come off",
                 (false, _) => "Courts are open — round 1 hasn't started yet",
                 (true, Timer::Idle) => "On court now — the clock starts when the organiser presses play",
                 _ => "Games in progress — find your name on a court",
             };
-            let sub_ink = if over && playing { pal.warning_fg } else { pal.fg3 };
+            let sub_ink = if paused || (over && playing) { pal.warning_fg } else { pal.fg3 };
             p.text(pos2(t.right() + 14.0, now_band.center().y), Align2::LEFT_CENTER, sub, regular(16.0), sub_ink);
         }
         let area = Rect::from_min_max(pos2(full.left(), now_band.bottom() + gap), full.max);
         let label_h = 56.0 + deck_help_h;
         let usable = area.height() - label_h;
-        // Before anyone is on court, the people about to play matter most.
         let idle = self.state.session.courts.iter().all(|c| c.iter().all(Option::is_none));
-        let courts_h = usable * if idle { 0.5 } else { 0.7 };
-        let deck_h = usable - courts_h;
+        // Up next stays compact (the same height whether or not anyone is on
+        // court yet); the courts get the rest.
+        let deck_h = (usable * 0.3).min(260.0 * rows as f32);
+        let courts_h = usable - deck_h;
         let col_w = (area.width() - gap * (cols as f32 - 1.0)) / cols as f32;
         let court_row_h = (courts_h - gap * (rows as f32 - 1.0)) / rows as f32;
         let deck_row_h = (deck_h - gap * (rows as f32 - 1.0)) / rows as f32;
@@ -1096,7 +1275,7 @@ impl DropInApp {
         let occupied = (0..4).any(|s| self.state.session.slot(Spot::Court(i, s)).is_some());
         let time_up = occupied && self.state.timer_finished(now);
         // While a game is on, a shuttle is in play; otherwise it lies by the net.
-        let rally = occupied && !time_up && !matches!(self.state.session.timer, Timer::Paused { .. });
+        let rally = occupied && !time_up && !matches!(self.state.session.timer, Timer::Paused { .. }) && self.state.session.clock.running();
         self.hall.paint_live(&p, rect, &view, i, ui.input(|i| i.time), pal.dark, rally);
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(if rally { 33 } else { 66 }));
         if !rally {
@@ -1192,8 +1371,9 @@ impl DropInApp {
                 .on_hover_text(format!("Send this group onto court {} now", i + 1));
             if resp.clicked() {
                 self.act(&ctx, format!("Court {} started early", i + 1), |s| {
-                    s.promote_deck(i, now_ms());
-                    s.fill_deck(now_ms());
+                    let now = s.now();
+                    s.promote_deck(i, now);
+                    s.fill_deck(now);
                 });
             }
         }
@@ -1262,7 +1442,7 @@ impl DropInApp {
             .find(|(r, _)| r.contains(pos))
             .map(|(_, t)| *t);
         if let Some(target) = target {
-            let now = now_ms();
+            let now = self.state.now();
             self.state.move_player(pid, target, now);
             // Settle the chip from where it was dropped.
             self.note_rect(pid, Rect::from_center_size(pos, vec2(240.0, 56.0)));
@@ -1694,11 +1874,11 @@ impl DropInApp {
         // --- Footer ---
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             ui.horizontal(|ui| {
-                if widgets::button(ui, pal, ButtonKind::Secondary, Some(icon::CALENDAR), "New game day…", 36.0)
-                    .on_hover_text("Check everyone out and clear the courts")
+                if widgets::button(ui, pal, ButtonKind::Secondary, Some(icon::CALENDAR), "New session…", 36.0)
+                    .on_hover_text("Put this session into History and start a new one")
                     .clicked()
                 {
-                    self.confirm = Some(Confirm::NewDay);
+                    self.session_form = Some(SessionForm::at(wall_ms(), true, false));
                 }
             });
             widgets::hdivider(ui, pal);
@@ -1880,7 +2060,7 @@ impl DropInApp {
         if !self.settings_open {
             return;
         }
-        let now = now_ms();
+        let now = self.state.now();
         let before = self.state.settings.clone();
         let modal = Modal::new(unique("settings"))
             .frame(Self::dialog_frame(pal))
@@ -2151,11 +2331,6 @@ impl DropInApp {
     fn confirm_dialog(&mut self, ctx: &egui::Context, pal: &Palette) {
         let Some(which) = self.confirm else { return };
         let (title, body, action) = match which {
-            Confirm::NewDay => (
-                "Start a new game day?".to_owned(),
-                "Today goes into History (games still on court count as finished). Everyone starts checked out; your roster and settings are kept.".to_owned(),
-                "Start new day",
-            ),
             Confirm::Delete(id) => (
                 format!("Remove {}?", self.state.name(id)),
                 "They'll be taken off the roster. Their past games stay in History.".to_owned(),
@@ -2188,10 +2363,9 @@ impl DropInApp {
         if go {
             self.confirm = None;
             match which {
-                Confirm::NewDay => self.start_new_day(ctx, true),
                 Confirm::Delete(id) => {
                     let name = self.state.name(id).to_owned();
-                    self.act(ctx, format!("{name} removed"), |s| s.delete_player(id, now_ms()));
+                    self.act(ctx, format!("{name} removed"), |s| s.delete_player(id, s.now()));
                 }
             }
         }
@@ -2293,6 +2467,7 @@ impl DropInApp {
         if let Some(id) = pick {
             self.select_day(&mut view, id);
         }
+
         if open && !modal.should_close() {
             self.history = Some(view);
         }
@@ -2318,7 +2493,7 @@ impl DropInApp {
             pal.fg1,
         );
         if live {
-            widgets::paint_badge(p, pos2(title.right() + 8.0, title.center().y), Align2::LEFT_CENTER, None, "Today", 11.0, pal.brand_subtle, pal.on_brand_subtle);
+            widgets::paint_badge(p, pos2(title.right() + 8.0, title.center().y), Align2::LEFT_CENTER, None, "Current", 11.0, pal.brand_subtle, pal.on_brand_subtle);
         }
         let end = d.ended_ms.map_or("now".to_owned(), |e| fmt_date(e, "%-I:%M %p"));
         p.text(
@@ -2343,7 +2518,7 @@ impl DropInApp {
         );
         ui.add_space(12.0);
         // The night at a glance.
-        let span = day.ended_ms.unwrap_or_else(now_ms) - day.started_ms;
+        let span = day.ended_ms.unwrap_or_else(|| self.state.now()) - day.started_ms;
         let most = detail.attendees.first().filter(|(_, _, g)| *g > 0);
         let tile_w = ((ui.available_width() + 10.0) / 3.0 - 10.0).floor().max(120.0);
         ui.horizontal(|ui| {
@@ -2711,7 +2886,7 @@ impl DropInApp {
 
     fn apply_player_action(&mut self, ctx: &egui::Context, id: PlayerId, action: PlayerAction) {
         let Some(name) = self.state.players.get(&id).map(|p| p.name.clone()) else { return };
-        let now = now_ms();
+        let now = self.state.now();
         match action {
             PlayerAction::ToWaiting => {
                 let presence = self.state.session.present.get(&id);

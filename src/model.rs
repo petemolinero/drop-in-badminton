@@ -1,8 +1,10 @@
 //! Core data model: players, settings, and the state of tonight's session.
 //!
-//! Every timestamp is wall-clock Unix time in milliseconds, so "time since last
-//! played" stays accurate across rounds, breaks between rounds, and even app
-//! restarts.
+//! Every session timestamp (check-ins, games, the round timer) is in *session
+//! time*: Unix milliseconds on the session's own clock ([`SessionClock`]),
+//! which starts at whatever date and time the organiser chose and only moves
+//! while the session is running. Pause it and every wait, game and timer
+//! stops with it. Only `last_activity_ms` is real wall-clock time.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -17,7 +19,8 @@ pub type Slots = [Option<PlayerId>; 4];
 
 pub const EMPTY_SLOTS: Slots = [None; 4];
 
-pub fn now_ms() -> i64 {
+/// Real (wall-clock) time, Unix ms. Session code wants [`AppState::now`].
+pub fn wall_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -164,6 +167,57 @@ pub struct GameRecord {
     pub players: Slots,
 }
 
+/// The session's own clock, which every time in the session is read from.
+/// It starts at a chosen date and time and counts up only while running.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionClock {
+    /// When the session began (any date and time; nothing checks it), Unix ms.
+    pub start_ms: i64,
+    /// Time banked on the clock before the current run.
+    pub elapsed_ms: i64,
+    /// Wall-clock time the current run began; `None` while paused.
+    pub running_since: Option<i64>,
+}
+
+impl SessionClock {
+    /// A clock reading `start_ms`, running from wall time `wall`.
+    pub fn starting(start_ms: i64, wall: i64) -> Self {
+        Self { start_ms, elapsed_ms: 0, running_since: Some(wall) }
+    }
+
+    /// Set up (sessions saved before the clock existed have none).
+    pub fn is_set(&self) -> bool {
+        self.start_ms != 0
+    }
+
+    pub fn running(&self) -> bool {
+        self.running_since.is_some()
+    }
+
+    /// How long the session has run, as of wall time `wall`.
+    pub fn elapsed(&self, wall: i64) -> i64 {
+        self.elapsed_ms + self.running_since.map_or(0, |since| (wall - since).max(0))
+    }
+
+    /// Session time at wall time `wall`.
+    pub fn now(&self, wall: i64) -> i64 {
+        self.start_ms + self.elapsed(wall)
+    }
+
+    /// Stop the clock as it read at wall time `wall`.
+    pub fn pause(&mut self, wall: i64) {
+        self.elapsed_ms = self.elapsed(wall);
+        self.running_since = None;
+    }
+
+    pub fn resume(&mut self, wall: i64) {
+        if self.running_since.is_none() {
+            self.running_since = Some(wall);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Timer {
     Idle,
@@ -184,7 +238,11 @@ pub struct Session {
     pub skip_round: BTreeSet<PlayerId>,
     pub timer: Timer,
     pub round_number: u32,
+    /// Wall-clock time of the last change (to notice a session left running
+    /// for days). The only real-time field here.
     pub last_activity_ms: i64,
+    /// The clock every other time here is read from.
+    pub clock: SessionClock,
 
     // ----- History for this game day (mirrored into the database on save) -----
     /// Database id of this game day, assigned on first save.
@@ -204,7 +262,8 @@ impl Default for Session {
             skip_round: BTreeSet::new(),
             timer: Timer::Idle,
             round_number: 0,
-            last_activity_ms: now_ms(),
+            last_activity_ms: wall_ms(),
+            clock: SessionClock::default(),
             day_id: None,
             day_ended_ms: None,
             attendance: Vec::new(),
@@ -252,6 +311,37 @@ impl Session {
     pub fn is_here(&self, id: PlayerId) -> bool {
         self.present.contains_key(&id)
     }
+
+    /// Move the whole session in time by `delta` ms (a new start date or
+    /// time): every timestamp shifts together, so durations don't change.
+    pub fn shift(&mut self, delta: i64) {
+        self.clock.start_ms += delta;
+        for p in self.present.values_mut() {
+            p.checked_in_ms += delta;
+            if let Some(t) = &mut p.last_played_ms {
+                *t += delta;
+            }
+        }
+        for t in self.court_started_ms.iter_mut().flatten() {
+            *t += delta;
+        }
+        if let Timer::Running { end_ms } = &mut self.timer {
+            *end_ms += delta;
+        }
+        if let Some(t) = &mut self.day_ended_ms {
+            *t += delta;
+        }
+        for a in &mut self.attendance {
+            a.in_ms += delta;
+            if let Some(t) = &mut a.out_ms {
+                *t += delta;
+            }
+        }
+        for g in &mut self.games {
+            g.started_ms += delta;
+            g.ended_ms += delta;
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -264,6 +354,21 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// The current session time.
+    pub fn now(&self) -> i64 {
+        self.session.clock.now(wall_ms())
+    }
+
+    /// Sessions saved before the session clock existed: start it at the
+    /// first check-in, already running (as wall-clock time always was).
+    pub fn ensure_clock(&mut self, wall: i64) {
+        let s = &mut self.session;
+        if !s.clock.is_set() {
+            let start = s.attendance.iter().map(|a| a.in_ms).min().unwrap_or(wall).min(wall);
+            s.clock = SessionClock { start_ms: start, elapsed_ms: wall - start, running_since: Some(wall) };
+        }
+    }
+
     pub fn add_player(&mut self, name: &str, skill: Skill) -> PlayerId {
         self.next_id = self.next_id.max(self.players.keys().max().map_or(0, |m| m + 1));
         let id = self.next_id;
