@@ -117,6 +117,21 @@ impl AppState {
 
     // ----- Attendance ------------------------------------------------------
 
+    /// Make `id` count as having waited `wait_ms` as of `now` (the queue
+    /// re-sorts by it).
+    pub fn set_wait(&mut self, id: PlayerId, wait_ms: i64, now: i64) {
+        let Some(p) = self.session.present.get_mut(&id) else { return };
+        let since = now - wait_ms.max(0);
+        match p.last_played_ms {
+            Some(_) => {
+                p.last_played_ms = Some(since);
+                p.checked_in_ms = p.checked_in_ms.min(since);
+            }
+            None => p.checked_in_ms = since,
+        }
+        self.fill_deck(now);
+    }
+
     pub fn check_in(&mut self, id: PlayerId, now: i64) {
         if !self.players.contains_key(&id) {
             return;

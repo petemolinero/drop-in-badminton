@@ -39,6 +39,7 @@ enum PlayerAction {
     Break,
     Skill(Skill),
     Rename,
+    Wait,
     Delete,
 }
 
@@ -140,6 +141,8 @@ pub struct DropInApp {
     pending: Option<(PlayerId, PlayerAction)>,
     /// The rename dialog: player, edit buffer, and whether it still needs focus.
     rename_dialog: Option<(PlayerId, String, bool)>,
+    /// The adjust-wait dialog: player, minutes typed, and whether it still needs focus.
+    wait_dialog: Option<(PlayerId, String, bool)>,
     drag: Option<PlayerId>,
     drop_targets: Vec<(Rect, Target)>,
     anims: HashMap<PlayerId, ChipAnim>,
@@ -199,6 +202,7 @@ impl DropInApp {
             session_form: None,
             pending: None,
             rename_dialog: None,
+            wait_dialog: None,
             drag: None,
             drop_targets: Vec::new(),
             anims: HashMap::new(),
@@ -469,6 +473,7 @@ impl eframe::App for DropInApp {
         self.confirm_dialog(&ctx, &pal);
         self.history_dialog(&ctx, &pal);
         self.rename_dialog_ui(&ctx, &pal);
+        self.wait_dialog_ui(&ctx, &pal);
         self.help_dialog(&ctx, &pal);
         if let Some((id, action)) = self.pending.take() {
             self.apply_player_action(&ctx, id, action);
@@ -2874,6 +2879,10 @@ impl DropInApp {
             if item(ui, icon::EDIT, "Rename…", true, pal.fg1) {
                 chosen = Some(PlayerAction::Rename);
             }
+            let on_court = matches!(self.state.session.locate(id), Some(Spot::Court(..)));
+            if item(ui, icon::HOURGLASS, "Adjust wait time…", here && !on_court, pal.fg1) {
+                chosen = Some(PlayerAction::Wait);
+            }
             ui.separator();
             if item(ui, icon::DELETE, "Delete player…", true, pal.danger_fg) {
                 chosen = Some(PlayerAction::Delete);
@@ -2912,6 +2921,10 @@ impl DropInApp {
                 });
             }
             PlayerAction::Rename => self.rename_dialog = Some((id, name, true)),
+            PlayerAction::Wait => {
+                let mins = self.shown_wait_ms(id, now).unwrap_or(0) / 60_000;
+                self.wait_dialog = Some((id, mins.to_string(), true));
+            }
             PlayerAction::Delete => self.confirm = Some(Confirm::Delete(id)),
         }
     }
@@ -3024,6 +3037,76 @@ impl DropInApp {
             }
         } else if !cancel && !modal.should_close() {
             self.rename_dialog = Some((id, buf, false));
+        }
+    }
+}
+
+impl DropInApp {
+    /// Set how long a player has been waiting, in minutes. Enter saves.
+    fn wait_dialog_ui(&mut self, ctx: &egui::Context, pal: &Palette) {
+        let Some((id, mut buf, needs_focus)) = self.wait_dialog.take() else { return };
+        let name = self.state.name(id).to_owned();
+        let mut save = false;
+        let mut cancel = false;
+        let modal = Modal::new(unique("wait"))
+            .frame(Self::dialog_frame(pal))
+            .backdrop_color(pal.scrim)
+            .show(ctx, |ui| {
+                ui.set_width(380.0);
+                ui.label(RichText::new(format!("{name}'s wait")).font(semibold(20.0)));
+                ui.label(
+                    RichText::new("Minutes since they last played (or arrived). The waiting list re-sorts to match.")
+                        .font(regular(14.0))
+                        .color(pal.fg2),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let minutes = buf.trim().parse::<i64>().ok();
+                    if widgets::button(ui, pal, ButtonKind::Secondary, None, "−5", 36.0).clicked() {
+                        buf = (minutes.unwrap_or(0) - 5).max(0).to_string();
+                    }
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut buf)
+                            .font(regular(18.0))
+                            .margin(Margin::symmetric(10, 7))
+                            .desired_width(90.0)
+                            .align(Align2::CENTER_CENTER),
+                    );
+                    if needs_focus {
+                        resp.request_focus();
+                    }
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        save = true;
+                    }
+                    if widgets::button(ui, pal, ButtonKind::Secondary, None, "+5", 36.0).clicked() {
+                        buf = (minutes.unwrap_or(0) + 5).max(0).to_string();
+                    }
+                    ui.label(RichText::new("minutes").font(regular(15.0)).color(pal.fg2));
+                });
+                if ui.input(|i| i.key_pressed(Key::Escape)) {
+                    cancel = true;
+                }
+                ui.add_space(16.0);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let ok = buf.trim().parse::<i64>().is_ok_and(|m| (0..=24 * 60).contains(&m));
+                    if ui.add_enabled_ui(ok, |ui| widgets::button(ui, pal, ButtonKind::Primary, None, "Save", 34.0)).inner.clicked() {
+                        save = true;
+                    }
+                    if widgets::button(ui, pal, ButtonKind::Secondary, None, "Cancel", 34.0).clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if save {
+            if let Some(mins) = buf.trim().parse::<i64>().ok().filter(|m| (0..=24 * 60).contains(m)) {
+                let now = self.state.now();
+                let label = if mins == 1 { "1 minute".to_owned() } else { format!("{mins} minutes") };
+                self.act(ctx, format!("{name} has now waited {label}"), |s| s.set_wait(id, mins * 60_000, now));
+                return;
+            }
+            self.wait_dialog = Some((id, buf, false));
+        } else if !cancel && !modal.should_close() {
+            self.wait_dialog = Some((id, buf, false));
         }
     }
 }
