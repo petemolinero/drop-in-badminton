@@ -23,3 +23,4 @@ if ($Expect -and $used -ne $Expect) { "FAILED: expected graphics '$Expect', got 
 if ($p.HasExited) { "FAILED: $Exe exited with code $($p.ExitCode)"; exit 1 }
 "OK: $Exe still running after 20 s"
 Get-Process drop-in-badminton, released -ErrorAction SilentlyContinue | Stop-Process
+exit 0
