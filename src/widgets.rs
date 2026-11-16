@@ -132,6 +132,53 @@ pub fn icon_button(ui: &mut Ui, pal: &Palette, icon: &str, size: f32, checked: b
 
 /// Paint an icon button into `rect`. With `color = Some((bg, fg))` it's a
 /// round filled button (e.g. the timer's play button).
+/// The symbol on the timer's round button.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Media {
+    Play,
+    Pause,
+    Next,
+}
+
+/// A round button with a play / pause / next symbol drawn as shapes (not a
+/// font glyph), so it sits exactly in the middle. Triangles are nudged right
+/// a little so they look centred rather than measure centred.
+pub fn paint_media_button(ui: &Ui, rect: Rect, resp: &Response, glyph: Media, bg: Color32) {
+    let st = interaction(ui, resp);
+    let p = ui.painter();
+    let c = rect.center();
+    let fill = lerp_color(bg, Color32::BLACK, st.0 * 0.12 + st.1 * 0.12);
+    p.circle_filled(c, rect.width() / 2.0, fill);
+    let s = rect.width() * 0.34;
+    let ink = Color32::WHITE;
+    let bar = |x: f32, w: f32| {
+        p.rect_filled(Rect::from_center_size(pos2(x, c.y), vec2(w, s)), CornerRadius::same((w * 0.3) as u8), ink);
+    };
+    let triangle = |left: f32, w: f32| {
+        let pts = vec![pos2(left, c.y - s / 2.0), pos2(left + w, c.y), pos2(left, c.y + s / 2.0)];
+        p.add(egui::Shape::convex_polygon(pts, ink, Stroke::new(1.5, ink)));
+    };
+    match glyph {
+        Media::Pause => {
+            let w = s * 0.3;
+            let gap = s * 0.26;
+            bar(c.x - (gap + w) / 2.0, w);
+            bar(c.x + (gap + w) / 2.0, w);
+        }
+        Media::Play => {
+            let w = s * 0.9;
+            triangle(c.x - w / 2.0 + w * 0.1, w);
+        }
+        Media::Next => {
+            let (w, bw, gap) = (s * 0.8, s * 0.22, s * 0.1);
+            let total = w + gap + bw;
+            let left = c.x - total / 2.0 + w * 0.06;
+            triangle(left, w);
+            bar(left + w + gap + bw / 2.0, bw);
+        }
+    }
+}
+
 pub fn paint_icon_button(
     ui: &Ui,
     pal: &Palette,
@@ -347,6 +394,10 @@ fn fit(painter: &egui::Painter, text: &str, family: fn(f32) -> egui::FontId, siz
     if w > max_width && w > 0.0 { (size * max_width / w).floor().max(8.0) } else { size }
 }
 
+fn chip_radius(rect: Rect) -> u8 {
+    (rect.height() * 0.16).clamp(4.0, 10.0) as u8
+}
+
 /// Paint a player chip: a skill-colored card with the name.
 /// The font shrinks to fit the name.
 #[allow(clippy::too_many_arguments)]
@@ -363,7 +414,7 @@ pub fn paint_player_chip(
     meta_cap: f32,
 ) {
     let fg = theme::on_skill_color(skill);
-    let r = (rect.height() * 0.16).clamp(4.0, 10.0) as u8;
+    let r = chip_radius(rect);
     elevate(painter, pal, rect, r, 2);
     if lifted > 0.0 {
         // Fade the lifted shadow in and out instead of popping between levels.
@@ -381,43 +432,24 @@ pub fn paint_player_chip(
     }
     let h = rect.height();
     let stack = stacked(rect.size());
-    let show_tag = h >= 30.0;
-    // The level tag: beside the name on wide cards, leading the small line on
-    // squarer ones. Either way it travels with the text, centred as a group.
-    let tf = if stack { (h * if detail.is_some() { 0.17 } else { 0.17 }).clamp(13.0, 17.0).round() } else { tag_font(h) };
-    let tag_size = vec2(tf * 2.9, tf * 1.6);
-    let gap = (tf * 0.7).round();
     let avail = text_width(rect.size());
     let detail = detail.filter(|_| h >= 40.0);
-    // A tag-only second line is short, so the name keeps most of the height.
-    let name_max = if detail.is_some() { font_size.min((h * 0.42).round()) } else if stack && show_tag { font_size.min((h * 0.48).round()) } else { font_size.min((h * 0.5).round()) };
+    let name_max = if detail.is_some() { font_size.min((h * 0.42).round()) } else { font_size.min((h * 0.5).round()) };
     let size = fit(painter, name, theme::semibold, name_max, avail);
-    let sub_avail = if stack && show_tag { avail - tag_size.x - gap } else { avail };
     let sub_line = detail.map(|detail| {
         let small = (h * 0.16).round().clamp(12.0, 15.0).min(meta_cap);
-        let small = fit(painter, detail, theme::regular, small, sub_avail).max(9.0);
-        elided(painter, detail, regular(small), fg, sub_avail)
+        let small = fit(painter, detail, theme::regular, small, avail).max(9.0);
+        elided(painter, detail, regular(small), fg, avail)
     });
-    let mut sub_h = sub_line.as_ref().map_or(0.0, |g| g.size().y).max(if stack && show_tag { tag_size.y } else { 0.0 });
-    // A tag-only second line can move to the card's corner to give a long
-    // name room for two full-size lines.
-    let mut tag_in_corner = false;
+    let sub_h = sub_line.as_ref().map_or(0.0, |g| g.size().y);
     let mut name_lines = vec![painter.layout_no_wrap(name.to_owned(), semibold(size), fg)];
     // A long name wraps onto two lines rather than shrinking a lot.
     if h >= 48.0 && size < (name_max * 0.9).floor() {
         if let Some((a, b)) = split_name(name) {
             let longer = if a.len() >= b.len() { a } else { b };
             let mut s2 = fit(painter, longer, theme::semibold, name_max, avail);
-            let can_corner = stack && show_tag && sub_line.is_none();
             while s2 > size {
-                let block = la_lb_height(painter, a, b, s2, fg);
-                let with_row = block + sub_h <= h * 0.98;
-                let in_corner = can_corner && block <= h * 0.9;
-                if with_row || in_corner {
-                    if !with_row {
-                        tag_in_corner = true;
-                        sub_h = 0.0;
-                    }
+                if la_lb_height(painter, a, b, s2, fg) + sub_h <= h * 0.98 {
                     name_lines = vec![
                         painter.layout_no_wrap(a.to_owned(), semibold(s2), fg),
                         painter.layout_no_wrap(b.to_owned(), semibold(s2), fg),
@@ -434,64 +466,18 @@ pub fn paint_player_chip(
     let names_h: f32 = name_lines.iter().map(|g| g.size().y).sum::<f32>() + tuck * (name_lines.len() as f32 - 1.0);
     let total = names_h + if sub_h > 0.0 { line_gap + sub_h } else { 0.0 };
     let mut y = (rect.center().y - total / 2.0 - size * 0.06).round();
-    let block_w = name_lines.iter().map(|g| g.size().x).fold(0.0, f32::max);
-    // The same light tag on every card, in both themes.
-    let plate_ink = if pal.dark { (Color32::from_gray(236), theme::lerp_color(theme::chip_color(skill), Color32::BLACK, 0.45)) } else { (Color32::from_white_alpha(230), theme::hex(0x1F2933)) };
-    let paint_tag = |at: Pos2| {
-        let tag = Rect::from_min_size(at, tag_size);
-        painter.rect_filled(tag, CornerRadius::same((tf * 0.4) as u8), plate_ink.0);
-        painter.text(tag.center(), Align2::CENTER_CENTER, skill.short(), theme::bold(tf), plate_ink.1);
-    };
-    if stack {
-        // Names centred; the small line leads with the tag. A wrapped long
-        // name carries the tag at the end of its second line instead.
-        let last = name_lines.len() - 1;
-        for (k, g) in name_lines.into_iter().enumerate() {
-            let inline = tag_in_corner && k == last;
-            let w = g.size().x + if inline { gap + tag_size.x } else { 0.0 };
-            let pos = pos2(rect.center().x - w / 2.0, y);
-            if inline {
-                paint_tag(pos2(pos.x + g.size().x + gap, y + g.size().y * 0.55 - tag_size.y / 2.0));
-            }
-            y += g.size().y + tuck;
-            text_shadow(painter, fg, pos, &g);
-            painter.galley(pos, g, fg);
-        }
-        let row_top = y - tuck + line_gap;
-        let sub_w = sub_line.as_ref().map_or(0.0, |g| g.size().x);
-        let row_w = sub_w + if show_tag { tag_size.x + if sub_w > 0.0 { gap } else { 0.0 } } else { 0.0 };
-        let mut x = rect.center().x - row_w / 2.0;
-        let row_mid = row_top + sub_h / 2.0;
-        if tag_in_corner {
-        } else if show_tag {
-            paint_tag(pos2(x, row_mid - tag_size.y / 2.0));
-            x += tag_size.x + gap;
-        }
-        if let Some(sub) = sub_line {
-            let pos = pos2(x, row_mid - sub.size().y / 2.0);
-            text_shadow(painter, fg, pos, &sub);
-            painter.galley(pos, sub, fg);
-        }
-    } else {
-        // A fixed tag slot on the left, the name left-aligned after it: tags
-        // and names line up down the court.
-        let _ = block_w;
-        let mut x = rect.left() + (h * 0.16).clamp(10.0, 18.0);
-        if show_tag {
-            paint_tag(pos2(x, rect.center().y - tag_size.y / 2.0));
-            x += tag_size.x + gap;
-        }
-        for g in name_lines {
-            let pos = pos2(x, y);
-            y += g.size().y + tuck;
-            text_shadow(painter, fg, pos, &g);
-            painter.galley(pos, g, fg);
-        }
-        if let Some(sub) = sub_line {
-            let pos = pos2(x, y - tuck + line_gap);
-            text_shadow(painter, fg, pos, &sub);
-            painter.galley(pos, sub, fg);
-        }
+    // Tall cards centre their text; short ones line it up on the left.
+    let x_of = |w: f32| if stack { rect.center().x - w / 2.0 } else { rect.left() + (h * 0.16).clamp(10.0, 18.0) };
+    for g in name_lines {
+        let pos = pos2(x_of(g.size().x), y);
+        y += g.size().y + tuck;
+        text_shadow(painter, fg, pos, &g);
+        painter.galley(pos, g, fg);
+    }
+    if let Some(sub) = sub_line {
+        let pos = pos2(x_of(sub.size().x), y - tuck + line_gap);
+        text_shadow(painter, fg, pos, &sub);
+        painter.galley(pos, sub, fg);
     }
 }
 
@@ -502,8 +488,7 @@ fn la_lb_height(painter: &egui::Painter, a: &str, b: &str, size: f32, fg: Color3
 /// Width available for a card's name.
 fn text_width(size: Vec2) -> f32 {
     let edge = (size.y * 0.16).clamp(10.0, 18.0);
-    let tag = if size.y >= 30.0 && !stacked(size) { tag_font(size.y) * 2.9 + (tag_font(size.y) * 0.7).round() } else { 0.0 };
-    size.x - 2.0 * edge - tag
+    size.x - 2.0 * edge
 }
 
 /// A faint light edge under dark text on a colored chip, as if pressed into
@@ -514,17 +499,11 @@ fn text_shadow(painter: &egui::Painter, fg: Color32, pos: Pos2, galley: &std::sy
     }
 }
 
-/// Text size of the level tag on a card of height `h`.
-fn tag_font(h: f32) -> f32 {
-    (h * 0.17).clamp(10.0, 15.0).round()
-}
 
 
 
-/// Squarish cards put the level tag in a corner instead of beside the name.
+/// Cards tall enough to centre their text (name, then any small line).
 fn stacked(size: Vec2) -> bool {
-    // Every card that's tall enough uses the same layout: name, then the tag
-    // (and any small line) underneath.
     size.y >= 40.0
 }
 
@@ -541,8 +520,7 @@ pub fn chip_name_size(painter: &egui::Painter, size: Vec2, name: &str, font_size
 pub fn chip_meta_size(painter: &egui::Painter, size: Vec2, detail: &str) -> f32 {
     let h = size.y;
     let small = (h * 0.16).round().clamp(12.0, 15.0);
-    let tag = if stacked(size) { (h * 0.17).clamp(13.0, 17.0).round() * 3.6 } else { 0.0 };
-    fit(painter, detail, theme::regular, small, text_width(size) - tag).max(9.0)
+    fit(painter, detail, theme::regular, small, text_width(size)).max(9.0)
 }
 
 /// One name size for a group of chips, so a card doesn't mix huge and tiny
@@ -615,21 +593,24 @@ pub fn court_title_next(painter: &egui::Painter, pal: &Palette, left_center: Pos
     tile.union(word)
 }
 
-/// "Court [3]": the word, then a numbered tile like a court sign. The tile is
-/// filled for courts and outlined for their Up next group. Returns the rect.
-pub fn court_title(painter: &egui::Painter, pal: &Palette, left_center: Pos2, number: usize, size: f32, filled: bool) -> Rect {
-    let side = (size * 1.35).round();
-    // "Court" first, then the number tile: it reads like the sign on a hall wall.
-    let word = painter.text(left_center, Align2::LEFT_CENTER, "Court", semibold(size), pal.fg1);
-    let tile = Rect::from_min_size(pos2(word.right() + size * 0.4, left_center.y - side / 2.0), Vec2::splat(side));
-    if filled {
-        painter.rect_filled(tile, CornerRadius::same((side * 0.22) as u8), pal.brand);
-        painter.text(tile.center(), Align2::CENTER_CENTER, number.to_string(), theme::bold(size * 0.9), pal.on_brand);
-    } else {
-        painter.rect(tile, CornerRadius::same((side * 0.22) as u8), pal.brand_subtle, Stroke::new(1.0, pal.brand_fg.gamma_multiply(0.5)), StrokeKind::Inside);
-        painter.text(tile.center(), Align2::CENTER_CENTER, number.to_string(), theme::bold(size * 0.9), pal.on_brand_subtle);
-    }
-    tile.union(word)
+/// "Court [3]" as the sign on the hall wall: white on a smoky plaque, with
+/// the number on a tile in the brand color. Returns the plaque's rect.
+pub fn court_sign(painter: &egui::Painter, pal: &Palette, left_center: Pos2, number: usize, size: f32) -> Rect {
+    let side = (size * 1.3).round();
+    let word = painter.layout_no_wrap("Court".to_owned(), semibold(size), Color32::WHITE);
+    let pad = (size * 0.35).round();
+    let plaque = Rect::from_min_size(
+        pos2(left_center.x, left_center.y - side / 2.0 - 3.0),
+        vec2(pad + word.size().x + size * 0.36 + side + 3.0, side + 6.0),
+    );
+    let radius = CornerRadius::same((side * 0.26) as u8);
+    painter.rect_filled(plaque, radius, Color32::from_rgba_unmultiplied(6, 14, 24, 150));
+    painter.rect_stroke(plaque, radius, Stroke::new(1.0, Color32::from_white_alpha(36)), StrokeKind::Inside);
+    let tile = Rect::from_min_size(pos2(plaque.right() - side - 3.0, left_center.y - side / 2.0), Vec2::splat(side));
+    painter.galley(pos2(plaque.left() + pad, left_center.y - word.size().y / 2.0), word, Color32::WHITE);
+    painter.rect_filled(tile, CornerRadius::same((side * 0.22) as u8), pal.brand);
+    painter.text(tile.center(), Align2::CENTER_CENTER, number.to_string(), theme::bold(size * 0.9), pal.on_brand);
+    plaque
 }
 
 /// A round "VS" medallion, for the line between two teams.

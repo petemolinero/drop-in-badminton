@@ -5,6 +5,7 @@
 
 mod app;
 mod engine;
+mod hall;
 mod model;
 mod store;
 mod surfaces;

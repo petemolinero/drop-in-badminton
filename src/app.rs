@@ -20,7 +20,7 @@ use egui::{
 use crate::engine::Target;
 use crate::model::*;
 use crate::store::{DayDetail, DaySummary, Store};
-use crate::surfaces::{self, Surfaces};
+use crate::hall::{self, Hall};
 use crate::theme::{self, Palette, icon, icon_font, regular, semibold};
 use crate::update::{self, Release, Status as UpdateStatus, Updater};
 use crate::widgets::{self, ButtonKind, Help, clock, short_duration, unique};
@@ -87,7 +87,7 @@ const CHIP_TEXT: f32 = 15.0;
 
 pub struct GoodmintonApp {
     state: AppState,
-    surfaces: Surfaces,
+    hall: Hall,
     store: Store,
     history: Option<HistoryView>,
     dirty: bool,
@@ -99,6 +99,10 @@ pub struct GoodmintonApp {
     new_name: String,
     new_skill: Skill,
     search: String,
+    /// Filter for the waiting list.
+    waiting_search: String,
+    /// What's typed in the clock's right-click panel.
+    time_edit: String,
     /// Player being renamed, the edit buffer, and whether the box still needs focus.
     renaming: Option<(PlayerId, String, bool)>,
     snackbar: Option<Snackbar>,
@@ -147,7 +151,7 @@ impl GoodmintonApp {
         });
         let mut app = Self {
             state,
-            surfaces: Surfaces::load(&cc.egui_ctx),
+            hall: Hall::load(&cc.egui_ctx),
             store,
             history: None,
             dirty: true,
@@ -158,6 +162,8 @@ impl GoodmintonApp {
             new_name: String::new(),
             new_skill: Skill::Intermediate,
             search: String::new(),
+            waiting_search: String::new(),
+            time_edit: String::new(),
             renaming: None,
             snackbar: None,
             confirm: None,
@@ -384,7 +390,14 @@ impl eframe::App for GoodmintonApp {
                     let avail = ui.available_size();
                     ui.set_min_size(avail);
                     ui.set_max_width(avail.x);
-                    self.pool(ui, &pal, now);
+                    self.side_tabs(ui, &pal, now);
+                    if self.roster_open {
+                        // Players dragged off a court can still be dropped here.
+                        self.drop_targets.push((ui.max_rect().expand(16.0), Target::Pool));
+                        self.roster(ui, &pal, now);
+                    } else {
+                        self.pool(ui, &pal, now);
+                    }
                 });
             });
 
@@ -400,7 +413,6 @@ impl eframe::App for GoodmintonApp {
         self.confirm_dialog(&ctx, &pal);
         self.history_dialog(&ctx, &pal);
         self.rename_dialog_ui(&ctx, &pal);
-        self.roster_dialog(&ctx, &pal, now);
         self.help_dialog(&ctx, &pal);
         if let Some((id, action)) = self.pending.take() {
             self.apply_player_action(&ctx, id, action);
@@ -546,6 +558,7 @@ impl GoodmintonApp {
         let t = ctx.input(|i| i.time);
         let gliding = self.anims.values().any(|a| a.t < 1.0);
         let settle = if show.contains("menu") { self.frame > 12 && !gliding } else { (self.snackbar.is_none() || t > 9.0) && !gliding };
+        let settle = settle && self.frame > 5 && self.hall.settled(t);
         if !self.shot_requested && t > 1.5 && settle {
             let ctx2 = ctx.clone();
             let cb = egui::ScreenshotCallback::new(move |img| {
@@ -713,7 +726,7 @@ impl GoodmintonApp {
         // Center: the timer.
         let left_edge = left.min_rect().right() + 8.0;
         let right_edge = right.min_rect().left() - 8.0;
-        let width = 600.0_f32.min(right_edge - left_edge);
+        let width = 284.0_f32.min(right_edge - left_edge);
         let cx = card.center().x.clamp(left_edge + width / 2.0, right_edge - width / 2.0);
         let timer_rect = Rect::from_center_size(pos2(cx, card.center().y), vec2(width, card.height()));
         // Toasts sit in the open stretch between the menu buttons and the timer.
@@ -767,7 +780,7 @@ impl GoodmintonApp {
         let frac = if total > 0 { remaining as f32 / total as f32 } else { 0.0 };
 
         // Play / pause inside a progress ring.
-        let (ring, resp) = ui.allocate_exact_size(Vec2::splat(96.0), Sense::click());
+        let (ring, resp) = ui.allocate_exact_size(Vec2::splat(72.0), Sense::click());
         let resp = resp
             .on_hover_cursor(CursorIcon::PointingHand)
             .on_hover_text(match (finished, timer) {
@@ -780,8 +793,8 @@ impl GoodmintonApp {
         {
             let p = ui.painter();
             let c = ring.center();
-            let r = 44.0;
-            p.circle_stroke(c, r, Stroke::new(10.0, pal.stroke2));
+            let r = 33.0;
+            p.circle_stroke(c, r, Stroke::new(5.0, pal.stroke2));
             // Time's up shows a full ring in the warm "time" color.
             let shown = if finished { 1.0 } else { ctx.animate_value_with_time(resp.id.with("frac"), frac, 0.25) };
             if shown > 0.0 {
@@ -792,23 +805,16 @@ impl GoodmintonApp {
                         c + r * Vec2::angled(a)
                     })
                     .collect();
-                let head = *pts.last().unwrap();
-                p.add(egui::Shape::line(pts, Stroke::new(10.0, accent)));
-                if running {
-                    // A glowing head on the arc, like a shuttle in flight.
-                    p.circle_filled(head, 7.0, accent.gamma_multiply(0.25));
-                    p.circle_filled(head, 4.5, Color32::WHITE);
-                    p.circle_stroke(head, 4.5, Stroke::new(1.5, accent));
-                }
+                p.add(egui::Shape::line(pts, Stroke::new(5.0, accent)));
             }
         }
-        let btn = Rect::from_center_size(ring.center(), Vec2::splat(66.0));
+        let btn = Rect::from_center_size(ring.center(), Vec2::splat(50.0));
         // Players on court but the clock isn't running: the play button pulses.
         let courts_busy = self.state.session.courts.iter().any(|c| c.iter().any(Option::is_some));
         if matches!(timer, Timer::Idle) && courts_busy {
             let t = ctx.input(|i| i.time) as f32;
             let phase = (t * 0.9).fract();
-            ui.painter().circle_stroke(btn.center(), 33.0 + phase * 14.0, Stroke::new(3.0, pal.brand_fg.gamma_multiply(0.7 * (1.0 - phase))));
+            ui.painter().circle_stroke(btn.center(), 25.0 + phase * 12.0, Stroke::new(3.0, pal.brand_fg.gamma_multiply(0.7 * (1.0 - phase))));
             ctx.request_repaint();
         }
         // At 0:00 the button restarts the clock for another go.
@@ -817,9 +823,9 @@ impl GoodmintonApp {
         let courts_idle = self.state.session.courts.iter().all(|c| c.iter().all(Option::is_none));
         let deck_ready = self.state.session.deck.iter().any(|g| g.iter().any(Option::is_some));
         let advance = finished || (courts_idle && deck_ready);
-        let glyph = if running { icon::PAUSE_F } else if advance { icon::NEXT_F } else { icon::PLAY_F };
+        let glyph = if running { widgets::Media::Pause } else if advance { widgets::Media::Next } else { widgets::Media::Play };
         let bg = if finished { theme::hex(0xC2410C) } else { pal.brand };
-        widgets::paint_icon_button(ui, pal, btn, &resp, glyph, false, Some((bg, Color32::WHITE)));
+        widgets::paint_media_button(ui, btn, &resp, glyph, bg);
         if resp.clicked() {
             if advance {
                 self.next_round(&ctx);
@@ -828,17 +834,18 @@ impl GoodmintonApp {
                 self.dirty = true;
             }
         }
-        ui.add_space(12.0);
+        ui.add_space(10.0);
 
         // Big digits, in fixed-width cells so they don't jiggle.
         let text = if finished { "0:00".to_owned() } else { clock(remaining) };
         // The timer is the most-glanced thing in the room: make it big.
-        let size = 80.0;
+        let size = 60.0;
         let cell = size * 0.58;
         let colon = size * 0.3;
         let width: f32 = text.chars().map(|ch| if ch == ':' { colon } else { cell }).sum();
         // Always room for "00:00", so the buttons beside it never shift.
-        let (digits, _) = ui.allocate_exact_size(vec2(cell * 4.0 + colon + 8.0, 114.0), Sense::hover());
+        let (digits, digits_resp) = ui.allocate_exact_size(vec2(cell * 4.0 + colon + 8.0, 86.0), Sense::click());
+        let digits_resp = digits_resp.on_hover_text("Right-click to change the time");
         let color = if finished {
             pal.warning_fg
         } else if final_minute {
@@ -851,7 +858,7 @@ impl GoodmintonApp {
         let mut x = digits.center().x - width / 2.0;
         for ch in text.chars() {
             let w = if ch == ':' { colon } else { cell };
-            ui.painter().text(pos2(x + w / 2.0, digits.center().y - 14.0), Align2::CENTER_CENTER, ch, semibold(size), color);
+            ui.painter().text(pos2(x + w / 2.0, digits.center().y - 11.0), Align2::CENTER_CENTER, ch, semibold(size), color);
             x += w;
         }
         let (status, glyph, bg, fg) = match (finished, timer) {
@@ -870,24 +877,56 @@ impl GoodmintonApp {
         } else {
             status.to_owned()
         };
-        widgets::paint_badge(ui.painter(), pos2(digits.center().x, digits.center().y + 40.0), Align2::CENTER_CENTER, Some(glyph), &status, 15.0, bg, fg);
-        ui.add_space(12.0);
-
-        ui.spacing_mut().item_spacing.x = 2.0;
-        if widgets::button(ui, pal, ButtonKind::Secondary, None, "−1 min", 36.0).on_hover_text("Take a minute off the clock").clicked() {
-            self.state.timer_adjust(-60_000, now);
-            self.dirty = true;
-        }
+        widgets::paint_badge(ui.painter(), pos2(digits.center().x, digits.center().y + 30.0), Align2::CENTER_CENTER, Some(glyph), &status, 13.0, bg, fg);
         ui.add_space(4.0);
-        if widgets::button(ui, pal, ButtonKind::Secondary, None, "+1 min", 36.0).on_hover_text("Add a minute to the clock").clicked() {
-            self.state.timer_adjust(60_000, now);
-            self.dirty = true;
+        let pencil = widgets::icon_button(ui, pal, icon::EDIT, 30.0, false).on_hover_text("Change the time");
+        if pencil.clicked() || digits_resp.secondary_clicked() {
+            self.time_edit = clock(remaining);
         }
-        ui.add_space(2.0);
-        if widgets::button(ui, pal, ButtonKind::Secondary, Some(icon::REPLAY), "Reset", 36.0).on_hover_text("Put the clock back to the full round").clicked() {
-            self.state.timer_reset();
-            self.dirty = true;
-        }
+        let menu = egui::Popup::menu(&pencil).id(unique("time-menu"));
+        self.time_menu(menu, pal, remaining, now);
+        let menu = egui::Popup::context_menu(&digits_resp).id(unique("time-menu-rc"));
+        self.time_menu(menu, pal, remaining, now);
+    }
+
+    /// The clock's edit panel (from the pencil, or a right-click on the
+    /// time): type a new time, or reset to a full round.
+    fn time_menu(&mut self, popup: egui::Popup<'_>, pal: &Palette, remaining: i64, now: i64) {
+        // Clicking into the box mustn't close it.
+        popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            ui.set_min_width(220.0);
+            ui.spacing_mut().button_padding = vec2(10.0, 7.0);
+            ui.label(RichText::new("Time left").font(semibold(15.0)).color(pal.fg1));
+            ui.label(RichText::new("Type minutes, or m:ss").font(regular(13.0)).color(pal.fg3));
+            let edit = ui.add(
+                egui::TextEdit::singleline(&mut self.time_edit)
+                    .font(regular(18.0))
+                    .margin(Margin::symmetric(10, 6))
+                    .desired_width(f32::INFINITY),
+            );
+            if !edit.has_focus() && !edit.lost_focus() && ui.memory(|m| m.focused().is_none()) {
+                edit.request_focus();
+            }
+            let typed = parse_clock(&self.time_edit);
+            let entered = edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let set = ui.add_enabled_ui(typed.is_some(), |ui| widgets::button(ui, pal, ButtonKind::Primary, None, "Set time", 32.0)).inner;
+                if let Some(ms) = typed.filter(|_| set.clicked() || entered) {
+                    self.state.timer_adjust(ms - remaining, now);
+                    self.dirty = true;
+                    ui.close();
+                }
+                if widgets::button(ui, pal, ButtonKind::Secondary, Some(icon::REPLAY), "Reset", 32.0)
+                    .on_hover_text("Put the clock back to the full round")
+                    .clicked()
+                {
+                    self.state.timer_reset();
+                    self.dirty = true;
+                    ui.close();
+                }
+            });
+        });
     }
 }
 
@@ -912,40 +951,28 @@ impl GoodmintonApp {
             let r = Rect::from_min_size(full.min, vec2(full.width(), courts_help_h - gap));
             widgets::paint_help(&painter, pal, r, g);
         }
-        // A "Now playing" band over the courts, matching the "Up next" band, so
-        // the two rows can't be mistaken for each other from across the room.
+        // A plain "Now playing" heading over the courts.
         let now_band = Rect::from_min_size(pos2(full.left(), full.top() + courts_help_h), vec2(full.width(), 40.0));
         {
             let p = ui.painter();
-            // Same band as "Up next", in a neutral dark ink so the two read as a pair.
-            let ink = if self.state.timer_finished(now) && self.state.session.courts.iter().any(|c| c.iter().any(Option::is_some)) {
-                theme::hex(0xC2410C)
-            } else if pal.dark {
-                theme::hex(0x2F4A6B)
-            } else {
-                theme::hex(0x2B3440)
-            };
-            widgets::card(p, pal, now_band, ink, 10, 2);
-            let t = p.text(pos2(now_band.left() + 16.0, now_band.center().y), Align2::LEFT_CENTER, "Now playing", semibold(20.0), Color32::WHITE);
-            let c = pos2(t.right() + 26.0, now_band.center().y);
-            p.circle_filled(c, 13.0, Color32::WHITE);
-            p.text(c, Align2::CENTER_CENTER, icon::SHUTTLE_F, icon_font(16.0), ink);
             let playing = self.state.session.courts.iter().any(|c| c.iter().any(Option::is_some));
             let over = self.state.timer_finished(now);
+            let t = p.text(pos2(now_band.left() + 4.0, now_band.center().y), Align2::LEFT_CENTER, "Now playing", semibold(20.0), pal.fg1);
             let sub = match (playing, self.state.session.timer) {
                 _ if over && playing => "Time! Finish the point, shake hands, and come off",
                 (false, _) => "Courts are open — round 1 hasn't started yet",
                 (true, Timer::Idle) => "On court now — the clock starts when the organiser presses play",
                 _ => "Games in progress — find your name on a court",
             };
-            p.text(pos2(c.x + 22.0, c.y), Align2::LEFT_CENTER, sub, semibold(16.0), Color32::from_white_alpha(225));
+            let sub_ink = if over && playing { pal.warning_fg } else { pal.fg3 };
+            p.text(pos2(t.right() + 14.0, now_band.center().y), Align2::LEFT_CENTER, sub, regular(16.0), sub_ink);
         }
         let area = Rect::from_min_max(pos2(full.left(), now_band.bottom() + gap), full.max);
         let label_h = 56.0 + deck_help_h;
         let usable = area.height() - label_h;
         // Before anyone is on court, the people about to play matter most.
         let idle = self.state.session.courts.iter().all(|c| c.iter().all(Option::is_none));
-        let courts_h = usable * if idle { 0.4 } else { 0.62 };
+        let courts_h = usable * if idle { 0.5 } else { 0.7 };
         let deck_h = usable - courts_h;
         let col_w = (area.width() - gap * (cols as f32 - 1.0)) / cols as f32;
         let court_row_h = (courts_h - gap * (rows as f32 - 1.0)) / rows as f32;
@@ -975,27 +1002,9 @@ impl GoodmintonApp {
         let has_deck = self.state.session.deck.iter().any(|g| g.iter().any(Option::is_some));
         let finished = self.state.timer_finished(now);
         let first = self.state.session.round_number == 0 && idle && has_deck;
-        // One header bar in every state: quiet white normally, brand blue when
-        // it's calling people to their courts.
+        // A plain heading; it only turns brand blue when calling people to their courts.
         let cta = has_deck && (finished || first);
-        let banner = Rect::from_min_max(pos2(area.left(), label_y - 20.0), pos2(area.right(), label_y + 20.0));
-        // Same bar always; it just turns from a light tint to solid brand blue
-        // when it's calling people to their courts.
-        // Time's up turns the whole bar the warm "time" color: a room-wide signal.
-        let time_up = finished && has_deck;
-        let _ = time_up;
-        let (fill, ink, sub_ink) = (pal.brand, pal.on_brand, pal.on_brand);
-        if cta && finished {
-            let t = ui.input(|i| i.time) as f32;
-            let glow = 0.5 + 0.5 * (t * std::f32::consts::TAU * 0.9).sin();
-            p.rect_filled(banner.expand(1.0 + glow * 4.0), CornerRadius::same(12), pal.brand_fg.gamma_multiply(0.25 * glow));
-            ui.ctx().request_repaint();
-        }
-        widgets::card(p, pal, banner, fill, 10, if cta { 4 } else { 2 });
-        let label = p.text(pos2(banner.left() + 16.0, label_y), Align2::LEFT_CENTER, "Up next", semibold(20.0), ink);
-        let c = pos2(label.right() + 26.0, banner.center().y);
-        p.circle_filled(c, 13.0, ink);
-        p.text(c, Align2::CENTER_CENTER, icon::SHUTTLE_F, icon_font(16.0), fill);
+        let label = p.text(pos2(area.left() + 4.0, label_y), Align2::LEFT_CENTER, "Up next", semibold(20.0), pal.fg1);
         let (headline, hint) = if finished && has_deck {
             ("You're up! Grab your racket and head to your court", "")
         } else if first {
@@ -1003,9 +1012,10 @@ impl GoodmintonApp {
         } else {
             (if matches!(self.state.session.timer, Timer::Idle) { "Next games — you're on after this round" } else { "Get ready — you're on when the timer ends" }, "")
         };
-        p.text(pos2(c.x + 22.0, c.y), Align2::LEFT_CENTER, headline, semibold(18.0), if cta { ink } else { sub_ink });
+        let sub_font = if cta { semibold(16.0) } else { regular(16.0) };
+        p.text(pos2(label.right() + 14.0, label_y), Align2::LEFT_CENTER, headline, sub_font, if cta { pal.brand_fg } else { pal.fg3 });
         if !hint.is_empty() {
-            p.text(pos2(banner.right() - 16.0, c.y), Align2::RIGHT_CENTER, hint, semibold(16.0), ink);
+            p.text(pos2(area.right() - 4.0, label_y), Align2::RIGHT_CENTER, hint, semibold(16.0), pal.fg1);
         }
         let deck_top = area.top() + courts_h + label_h;
         for i in 0..n {
@@ -1093,76 +1103,65 @@ impl GoodmintonApp {
 
     fn court_card(&mut self, ui: &mut Ui, pal: &Palette, i: usize, rect: Rect, now: i64, dt: f32) {
         let p = ui.painter().clone();
-        widgets::card(&p, pal, rect, pal.bg1, 8, 4);
+        // The whole card is a window onto the hall: the court in 3D, lit from
+        // above, with the names standing on it. Snapped to whole pixels so
+        // the picture is drawn texel for pixel.
+        let ppp = ui.ctx().pixels_per_point();
+        let snap = |v: f32| (v * ppp).round() / ppp;
+        let rect = Rect::from_min_size(pos2(snap(rect.left()), snap(rect.top())), vec2(snap(rect.width()), snap(rect.height())));
+        widgets::elevate(&p, pal, rect, 8, 4);
+        let view = self.hall.paint(&p, rect, pal.dark, 8);
+        let at = |r: Rect| r.translate(rect.min.to_vec2());
+        let window = at(view.window);
 
-        // One header size for every court header, in every state.
-        let header_h = 54.0;
-        let hfont = 24.0;
-        let hy = rect.top() + header_h / 2.0 + 2.0;
-        widgets::court_title(&p, pal, pos2(rect.left() + 14.0, hy), i + 1, hfont, true);
-        let badge_size = CHIP_TEXT;
-        // The badge follows the round timer, so the board never contradicts itself.
         let occupied = (0..4).any(|s| self.state.session.slot(Spot::Court(i, s)).is_some());
-        let remaining = self.state.timer_remaining_ms(now);
+        let time_up = occupied && self.state.timer_finished(now);
+        // While a game is on, a shuttle is in play; otherwise it lies by the net.
+        let rally = occupied && !time_up && !matches!(self.state.session.timer, Timer::Paused { .. });
+        self.hall.paint_live(&p, rect, &view, i, ui.input(|i| i.time), pal.dark, rally);
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(if rally { 33 } else { 66 }));
+        if !rally {
+            let side = if i % 2 == 0 { 1.0 } else { -1.0 };
+            let (c, depth) = view.cam.project([side * (hall::HALF_W + 1.25), 0.0, -0.9 + 0.5 * (i % 3) as f32]);
+            let size = (view.cam.scale(depth).x * 0.34).clamp(9.0, 18.0);
+            widgets::paint_shuttle(&p, c + rect.min.to_vec2(), size, 2.3 + 1.9 * i as f32, pal.dark);
+        }
+
+        // The court's sign hangs on the back wall, beside the floodlights.
+        let hy = rect.top() + view.top / 2.0 + 1.0;
+        widgets::court_sign(&p, pal, pos2(rect.left() + 8.0, hy), i + 1, (view.top * 0.5).round());
         // The round's state lives under the timer; a court only gets a pill
         // when there's something to say about that court.
-        let pill = match self.state.session.timer {
-            _ if !occupied => None,
-            _ if self.state.timer_finished(now) => None,
-            Timer::Running { .. } if remaining <= 120_000 => Some(("Last points".to_owned(), Some(icon::HOURGLASS_F), pal.warning_subtle, pal.warning_fg)),
-            _ => None,
-        };
-        if let Some((text, glyph, bg, fg)) = pill {
-            widgets::paint_badge(&p, pos2(rect.right() - 14.0, hy), Align2::RIGHT_CENTER, glyph, &text, badge_size, bg, fg);
+        let remaining = self.state.timer_remaining_ms(now);
+        let last_points = occupied && !time_up && matches!(self.state.session.timer, Timer::Running { .. }) && remaining <= 120_000;
+        if last_points {
+            widgets::paint_badge(&p, pos2(rect.right() - 10.0, hy), Align2::RIGHT_CENTER, Some(icon::HOURGLASS_F), "Last points", CHIP_TEXT, pal.warning_subtle, pal.warning_fg);
         }
 
-        // The court, seen from above with the net running left to right.
-        let surface = Rect::from_min_max(
-            pos2(rect.left() + 10.0, rect.top() + header_h + 2.0),
-            pos2(rect.right() - 10.0, rect.bottom() - 10.0),
-        );
-        let lines = surfaces::paint_court(&p, &self.surfaces, pal.dark, i, surface);
-        // A stray shuttle on the wood beside the court, lying differently by every court.
-        let margin = lines.left() - surface.left();
-        if margin > 36.0 {
-            let right = surface.right() - margin / 2.0;
-            let y = lines.center().y - lines.height() * 0.03;
-            widgets::paint_shuttle(&p, pos2(right, y), (margin * 0.42).min(28.0), 2.3, pal.dark);
-        }
-        let (l, w) = (surfaces::COURT_L, surfaces::COURT_W);
-        // `x` runs along the length (top to bottom), `y` across the width.
-        let map = |x: f32, y: f32| pos2(lines.left() + lines.width() * y / w, lines.top() + lines.height() * x / l);
-
-        // Player positions: team A in the top half, team B in the bottom half,
-        // partners one behind the other so each name gets the court's width.
-        // Cards are a little wider than the court so names read from across the gym.
-        // Cards sit on the court, no wider than its lines.
-        let chip_w = (lines.width() * 1.02).min(surface.width() - 24.0);
-        let chip_h = (lines.height() * 0.185).clamp(28.0, 110.0);
-        let font = self.group_font(&p, Spot::Court(i, 0), vec2(chip_w, chip_h), (chip_h * 0.5).min(56.0));
+        // Team A stands on the far half and team B on the near half, either
+        // side of the net; every card is full size whatever its distance.
+        let cards = view.cards.map(at);
+        let chip = cards[0].size();
+        let font = self.group_font(&p, Spot::Court(i, 0), chip, (chip.y * 0.5).min(56.0));
         self.court_font = font.0;
-        let centers = [
-            map(1.9, w / 2.0),
-            map(4.75, w / 2.0),
-            map(l - 4.75, w / 2.0),
-            map(l - 1.9, w / 2.0),
-        ];
-        let time_up = occupied && self.state.timer_finished(now);
         if occupied && !time_up {
-            widgets::paint_vs(&p, pal, map(l / 2.0, w / 2.0), (chip_h * 0.26).clamp(12.0, 19.0));
+            widgets::paint_vs(&p, pal, window.center(), (window.height() * 0.3).clamp(12.0, 19.0));
         }
         if !occupied && self.drag.is_none() {
             // A free court gets one friendly sign instead of four empty slots
-            // (they come back as drop targets while dragging).
-            for (s, c) in centers.into_iter().enumerate() {
-                self.drop_targets.push((Rect::from_center_size(c, vec2(chip_w, chip_h)), Target::Slot(Spot::Court(i, s))));
+            // (they come back as drop targets while dragging). It hangs over
+            // the far half, leaving the net and the near court in view.
+            for (s, r) in cards.into_iter().enumerate() {
+                self.drop_targets.push((r, Target::Slot(Spot::Court(i, s))));
             }
-            let sign = Rect::from_center_size(map(l / 2.0, w / 2.0), vec2((lines.width() * 0.84).max(180.0), (chip_h * 1.5).max(96.0)));
-            p.rect_filled(sign.translate(vec2(0.0, 3.0)), CornerRadius::same(12), Color32::from_black_alpha(40));
+            let far = cards[0].union(cards[1]);
+            let sign = Rect::from_center_size(far.center(), vec2((rect.width() * 0.6).max(200.0).min(rect.width() - 16.0), far.height().clamp(72.0, 104.0)));
+            let sign = sign.translate(vec2(0.0, (far.top() - sign.top()).max(0.0)));
+            p.rect_filled(sign.translate(vec2(0.0, 3.0)), CornerRadius::same(12), Color32::from_black_alpha(60));
             p.rect_filled(sign, CornerRadius::same(12), if pal.dark { theme::hex(0x1B3A5C) } else { theme::hex(0x2B5C8F) });
             p.rect_stroke(sign, CornerRadius::same(12), Stroke::new(2.0, Color32::from_white_alpha(200)), StrokeKind::Inside);
             p.rect_stroke(sign, CornerRadius::same(12), Stroke::new(1.0, Color32::from_white_alpha(70)), StrokeKind::Inside);
-            let k = (sign.height() / 110.0).clamp(0.8, 1.4);
+            let k = (sign.height() / 110.0).clamp(0.72, 1.4);
             p.text(sign.center() - vec2(0.0, 26.0 * k), Align2::CENTER_CENTER, icon::SHUTTLE_F, icon_font(30.0 * k), Color32::from_white_alpha(230));
             p.text(sign.center() + vec2(0.0, 6.0 * k), Align2::CENTER_CENTER, "Court open", semibold(20.0 * k), Color32::WHITE);
             let hint = if self.state.session.deck[i].iter().any(Option::is_some) {
@@ -1174,18 +1173,15 @@ impl GoodmintonApp {
             p.text(sign.center() + vec2(0.0, 30.0 * k), Align2::CENTER_CENTER, hint, regular(hint_size), Color32::from_white_alpha(210));
             return;
         }
-        for (s, c) in centers.into_iter().enumerate() {
-            let r = Rect::from_center_size(c, vec2(chip_w, chip_h));
+        for (s, r) in cards.into_iter().enumerate() {
             self.slot(ui, pal, Spot::Court(i, s), r, font, Color32::from_white_alpha(140), "Open", dt);
         }
         if time_up {
-            // Game over on this court: hush the cards and stamp it.
-            let hush = Rect::from_min_max(pos2(surface.left(), lines.top()), pos2(surface.right(), lines.bottom()));
             // Game over on this court: wash it out and stamp it.
-            p.rect_filled(hush, CornerRadius::ZERO, theme::hex(0xC2410C).gamma_multiply(if pal.dark { 0.18 } else { 0.14 }));
+            p.rect_filled(rect, CornerRadius::same(8), theme::hex(0xC2410C).gamma_multiply(if pal.dark { 0.18 } else { 0.14 }));
             let tilt = [-0.07, 0.05, -0.04, 0.06][i % 4];
-            let size = (chip_h * 0.36).clamp(16.0, 30.0);
-            widgets::paint_stamp(&p, map(l / 2.0, w / 2.0), "TIME!", size, tilt, theme::hex(0xC2410C), Color32::WHITE);
+            let size = (chip.y * 0.36).clamp(16.0, 30.0);
+            widgets::paint_stamp(&p, window.center(), "TIME!", size, tilt, theme::hex(0xC2410C), Color32::WHITE);
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
         }
     }
@@ -1203,8 +1199,8 @@ impl GoodmintonApp {
         let group = self.state.session.deck[i];
         let filled = group.iter().flatten().count();
 
-        let header_h = 54.0;
-        let hfont = 24.0;
+        let header_h = 46.0;
+        let hfont = 21.0;
         let hy = rect.top() + header_h / 2.0 + 2.0;
         let title = widgets::court_title_next(&p, pal, pos2(rect.left() + 14.0, hy), i + 1, hfont);
         // Only a group that isn't complete needs a word.
@@ -1236,12 +1232,13 @@ impl GoodmintonApp {
             pos2(rect.left() + 14.0, rect.top() + header_h + 2.0),
             pos2(rect.right() - 14.0, rect.bottom() - 14.0),
         );
-        let net_h = 40.0;
+        // Teams one above the other, partners side by side; no net.
+        let net_h = 8.0;
         let col_gap = 8.0;
         let chip_h = ((body.height() - net_h) / 2.0).clamp(24.0, 150.0);
         let chip_w = (body.width() - col_gap) / 2.0;
         // Never louder than the courts: they're what matters most.
-        let font = self.group_font(&p, Spot::Deck(i, 0), vec2(chip_w, chip_h), (chip_h * 0.5).min(48.0));
+        let font = self.group_font(&p, Spot::Deck(i, 0), vec2(chip_w, chip_h), (chip_h * 0.38).min(32.0));
         let top = body.center().y - chip_h - net_h / 2.0;
         for s in 0..4 {
             let row = s / 2;
@@ -1251,23 +1248,6 @@ impl GoodmintonApp {
             let r = Rect::from_min_size(pos2(x, y), vec2(chip_w, chip_h));
             self.slot(ui, pal, Spot::Deck(i, s), r, font, pal.stroke_accessible, "Open", dt);
         }
-        // The "net" between the teams.
-        let c = body.center();
-        // A little net between the teams (like the court's), with posts and
-        // the VS medallion on it.
-        let net = Rect::from_center_size(c, vec2(body.width() - 16.0, 8.0));
-        let ink = if pal.dark { pal.stroke_accessible } else { theme::hex(0x1C3D5A) };
-        p.rect_filled(net, CornerRadius::same(2), ink.gamma_multiply(0.35));
-        for k in 0..((net.width() / 7.0) as i32) {
-            let x = net.left() + 3.0 + k as f32 * 7.0;
-            p.line_segment([pos2(x, net.top()), pos2(x, net.bottom())], Stroke::new(1.0, pal.bg1.gamma_multiply(0.6)));
-        }
-        p.line_segment([net.left_top(), net.right_top()], Stroke::new(2.0, ink));
-        for x in [net.left(), net.right()] {
-            // Posts, like the court's net.
-            p.rect_filled(Rect::from_center_size(pos2(x, net.center().y), vec2(4.0, 16.0)), CornerRadius::same(1), ink);
-        }
-        widgets::paint_vs(&p, pal, c, 15.0);
     }
 
     // ----- Drag and drop --------------------------------------------------
@@ -1323,6 +1303,40 @@ impl GoodmintonApp {
 // Waiting pool
 
 impl GoodmintonApp {
+    /// The right panel's tabs: the waiting list, or the roster for check-in.
+    fn side_tabs(&mut self, ui: &mut Ui, pal: &Palette, now: i64) {
+        let waiting = self.state.waiting_list(now).iter().filter(|id| !self.state.session.present[id].resting).count();
+        let tabs = [(false, "Waiting", waiting), (true, "Roster", self.state.session.present.len())];
+        let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::hover());
+        ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, pal.stroke2));
+        let mut x = bar.left();
+        for (roster, label, count) in tabs {
+            let p = ui.painter();
+            let selected = self.roster_open == roster;
+            let text = p.layout_no_wrap(label.to_owned(), semibold(20.0), pal.fg1);
+            let badge_w = p.layout_no_wrap(count.to_string(), semibold(13.0), pal.fg1).size().x + 13.0 * 1.1;
+            let w = text.size().x + 8.0 + badge_w + 20.0;
+            let rect = Rect::from_min_size(pos2(x, bar.top()), vec2(w, bar.height()));
+            let resp = ui.interact(rect, unique(("side-tab", label)), Sense::click());
+            let ink = if selected { pal.fg1 } else if resp.hovered() { pal.fg2 } else { pal.fg3 };
+            let p = ui.painter();
+            let text_pos = pos2(rect.left() + 10.0, rect.center().y - text.size().y / 2.0 - 2.0);
+            let text_right = text_pos.x + text.size().x;
+            p.galley_with_override_text_color(text_pos, text, ink);
+            let (bg, fg) = if selected { (pal.brand_subtle, pal.on_brand_subtle) } else { (pal.subtle_selected, pal.fg3) };
+            widgets::paint_badge(p, pos2(text_right + 8.0, rect.center().y - 2.0), Align2::LEFT_CENTER, None, &count.to_string(), 13.0, bg, fg);
+            if selected {
+                let line = Rect::from_min_max(pos2(rect.left() + 8.0, bar.bottom() - 3.0), pos2(rect.right() - 8.0, bar.bottom()));
+                p.rect_filled(line, CornerRadius::same(2), pal.brand_fg);
+            }
+            if resp.clicked() {
+                self.roster_open = roster;
+            }
+            x = rect.right() + 4.0;
+        }
+        ui.add_space(8.0);
+    }
+
     fn pool(&mut self, ui: &mut Ui, pal: &Palette, now: i64) {
         let ctx = ui.ctx().clone();
         let panel = ui.max_rect().expand(16.0);
@@ -1345,11 +1359,6 @@ impl GoodmintonApp {
             .into_iter()
             .partition(|id| !self.state.session.present[id].resting);
 
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Waiting").font(semibold(20.0)).color(pal.fg1));
-            let (r, _) = ui.allocate_exact_size(vec2(34.0, 26.0), Sense::hover());
-            widgets::paint_badge(ui.painter(), r.left_center(), Align2::LEFT_CENTER, None, &active.len().to_string(), 13.0, pal.brand_subtle, pal.on_brand_subtle);
-        });
         ui.label(RichText::new("Longest since last game first").font(regular(14.0)).color(pal.fg3));
         ui.add_space(6.0);
 
@@ -1379,6 +1388,21 @@ impl GoodmintonApp {
             .map(|(k, id)| (*id, Some(k + 1)))
             .chain(resting.iter().map(|id| (*id, None)))
             .collect();
+        // Search: narrows the list, but everyone keeps their real place in line.
+        ui.add(
+            egui::TextEdit::singleline(&mut self.waiting_search)
+                .hint_text(format!("{}  Search waiting players", icon::SEARCH))
+                .font(regular(15.0))
+                .margin(Margin::symmetric(10, 7))
+                .desired_width(f32::INFINITY),
+        );
+        ui.add_space(6.0);
+        let query = self.waiting_search.trim().to_lowercase();
+        let filtering = !query.is_empty();
+        let all: Vec<(PlayerId, Option<usize>)> = all
+            .into_iter()
+            .filter(|(id, _)| !filtering || self.state.name(*id).to_lowercase().contains(&query))
+            .collect();
         // Rows get as tall as the pane allows (up to 50) and shrink, down to a
         // readable 30, so the whole queue fits on screen before it has to scroll.
         let footer = 32.0;
@@ -1396,7 +1420,14 @@ impl GoodmintonApp {
         outer.style_mut().spacing.scroll = egui::style::ScrollStyle::solid();
         let scrolled = egui::ScrollArea::vertical().id_salt("waiting").auto_shrink([false, false]).show(&mut outer, |lui| {
         lui.spacing_mut().item_spacing.y = 0.0;
-        if active.is_empty() {
+        if filtering && all.is_empty() {
+            lui.add_space(24.0);
+            lui.vertical_centered(|ui| {
+                ui.label(RichText::new(icon::SEARCH).font(icon_font(34.0)).color(pal.fg3));
+                ui.label(RichText::new("No one waiting matches").font(semibold(16.0)).color(pal.fg1));
+                ui.label(RichText::new("Check the Roster tab, or they may be on a court.").font(regular(14.0)).color(pal.fg3));
+            });
+        } else if active.is_empty() {
             lui.add_space(24.0);
             lui.vertical_centered(|ui| {
                 ui.label(RichText::new(icon::SHUTTLE_F).font(icon_font(40.0)).color(pal.brand_fg.gamma_multiply(0.6)));
@@ -1411,7 +1442,7 @@ impl GoodmintonApp {
             }
             self.pool_row(lui, pal, *id, *rank, now, ROW);
         }
-        if (1..=6).contains(&all.len()) {
+        if !filtering && (1..=6).contains(&all.len()) {
             lui.add_space(28.0);
             lui.vertical_centered(|ui| {
                 ui.label(RichText::new(icon::SHUTTLE_F).font(icon_font(34.0)).color(pal.brand_fg.gamma_multiply(0.45)));
@@ -1566,10 +1597,8 @@ impl GoodmintonApp {
     fn roster(&mut self, ui: &mut Ui, pal: &Palette, now: i64) {
         let ctx = ui.ctx().clone();
         let extra = format!("{} checked in · {} players", self.state.session.present.len(), self.state.players.len());
-        if Self::dialog_title(ui, pal, "Roster", Some(extra)) {
-            self.roster_open = false;
-        }
-        ui.add_space(2.0);
+        ui.label(RichText::new(extra).font(regular(14.0)).color(pal.fg3));
+        ui.add_space(6.0);
 
         // --- Add a player ---
         Frame::NONE
@@ -1699,11 +1728,6 @@ impl GoodmintonApp {
                 {
                     self.confirm = Some(Confirm::NewDay);
                 }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if widgets::button(ui, pal, ButtonKind::Primary, None, "Done", 36.0).clicked() {
-                        self.roster_open = false;
-                    }
-                });
             });
             widgets::hdivider(ui, pal);
         });
@@ -2747,27 +2771,6 @@ impl GoodmintonApp {
 
     /// A small dialog for renaming from the right-click menu.
     /// Enter saves; Esc, Cancel, or clicking outside cancels.
-    /// Check-in: the roster in a dialog over the board, so the TV keeps
-    /// showing the courts and the waiting list underneath.
-    fn roster_dialog(&mut self, ctx: &egui::Context, pal: &Palette, now: i64) {
-        if !self.roster_open {
-            return;
-        }
-        let screen = ctx.content_rect();
-        let size = vec2(480.0, (screen.height() - 140.0).clamp(420.0, 860.0));
-        let modal = Modal::new(unique("roster"))
-            .frame(Self::dialog_frame(pal))
-            .backdrop_color(pal.scrim)
-            .show(ctx, |ui| {
-                ui.set_min_size(size);
-                ui.set_max_size(size);
-                self.roster(ui, pal, now);
-            });
-        if modal.should_close() && self.renaming.is_none() {
-            self.roster_open = false;
-        }
-    }
-
     /// "How it works": one dialog with every section's explanation.
     fn help_dialog(&mut self, ctx: &egui::Context, pal: &Palette) {
         if !self.help || self.settings_open || self.history.is_some() {
@@ -2899,4 +2902,17 @@ fn prune_backups(dir: &std::path::Path, keep: usize) {
     for (_, path) in files.into_iter().take(excess) {
         let _ = std::fs::remove_file(path);
     }
+}
+
+/// "7", "7:30" or "0:45" as milliseconds (at most 2 hours).
+fn parse_clock(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let (m, s) = match text.split_once(':') {
+        Some((m, s)) => (m.trim(), s.trim()),
+        None => (text, "0"),
+    };
+    let m: i64 = if m.is_empty() { 0 } else { m.parse().ok()? };
+    let s: i64 = s.parse().ok()?;
+    let ms = (m * 60 + s) * 1000;
+    (s < 60 && (0..=7_200_000).contains(&ms)).then_some(ms)
 }
