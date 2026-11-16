@@ -18,3 +18,7 @@ ureq = "3"
 # Smaller download for the self-updater.
 lto = "thin"
 strip = true
+
+[target.'cfg(windows)'.build-dependencies]
+# Puts the app icon into the .exe (Explorer, desktop shortcuts, taskbar).
+winresource = "0.1"

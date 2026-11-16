@@ -21,7 +21,12 @@ fn main() -> eframe::Result {
             .with_app_id("drop-in-badminton")
             .with_inner_size([1600.0, 900.0])
             .with_min_inner_size([1000.0, 640.0])
-            .with_maximized(true),
+            .with_maximized(true)
+            .with_icon(std::sync::Arc::new(egui::IconData {
+                rgba: include_bytes!("../assets/icon/app.rgba").to_vec(),
+                width: 256,
+                height: 256,
+            })),
         ..Default::default()
     };
     let result = eframe::run_native(

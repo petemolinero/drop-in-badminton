@@ -104,3 +104,5 @@ command ribbon over floating cards on a neutral canvas, in light or dark.
   `tools/build_icons.py` (needs `fonttools`), then copy the printed constants into `src/theme.rs`.
   Then run `tools/shuttle_glyph.py assets/fonts/FluentIcons-DropIn.ttf`: Fluent has no
   shuttlecock, so it draws one over the `SHUTTLE`/`SHUTTLE_F` slots.
+- **App icon:** `assets/icon/` (the .exe icon and the window icon) is drawn by
+  `tools/build_app_icon.py` from that shuttlecock; `build.rs` embeds it in the Windows .exe.
