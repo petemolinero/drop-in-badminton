@@ -33,5 +33,5 @@ def sub(ttf, js, names, style, remap_base=None):
     return f
 r = sub('FluentSystemIcons-Regular.ttf','FluentSystemIcons-Regular.json',REG,'regular'); r.save('r.ttf')
 f = sub('FluentSystemIcons-Filled.ttf','FluentSystemIcons-Filled.json',FIL,'filled',0x100000); f.save('f.ttf')
-merged = Merger().merge(['r.ttf','f.ttf']); merged.save('FluentIcons-Goodminton.ttf')
+merged = Merger().merge(['r.ttf','f.ttf']); merged.save('FluentIcons-DropIn.ttf')
 for c,cp in out: print(f'    pub const {c}: &str = "\\u{{{cp:x}}}";')

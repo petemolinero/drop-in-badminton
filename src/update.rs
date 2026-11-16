@@ -14,9 +14,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The release file built for this platform (see `.github/workflows/release.yml`).
 pub const ASSET: Option<&str> = if cfg!(all(windows, target_arch = "x86_64")) {
-    Some("goodminton-windows-x86_64.exe")
+    Some("drop-in-badminton-windows-x86_64.exe")
 } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-    Some("goodminton-linux-x86_64")
+    Some("drop-in-badminton-linux-x86_64")
 } else {
     None
 };
@@ -71,7 +71,7 @@ pub fn restart_if_requested() {
     }
     if let Some(Some(exe)) = EXE.get() {
         if let Err(err) = std::process::Command::new(exe).spawn() {
-            eprintln!("goodminton: couldn't restart: {err}");
+            eprintln!("drop-in-badminton: couldn't restart: {err}");
         }
     }
 }
@@ -84,7 +84,7 @@ impl Updater {
 
     /// Updates are off in development builds and on platforms with no release file.
     pub fn enabled() -> bool {
-        ASSET.is_some() && !cfg!(debug_assertions) && std::env::var_os("GOODMINTON_NO_UPDATE").is_none()
+        ASSET.is_some() && !cfg!(debug_assertions) && std::env::var_os("DROP_IN_BADMINTON_NO_UPDATE").is_none()
     }
 
     /// Debug screenshots: pretend an update was found.
@@ -126,7 +126,7 @@ impl Updater {
                 Ok(Some(release)) if is_newer(&release.version, VERSION) => Status::Available(release),
                 Ok(_) => Status::UpToDate,
                 Err(err) => {
-                    eprintln!("goodminton: update check failed: {err}");
+                    eprintln!("drop-in-badminton: update check failed: {err}");
                     Status::Failed(format!("Couldn't check for updates ({err})"))
                 }
             };
@@ -145,7 +145,7 @@ impl Updater {
             }) {
                 Ok(()) => Status::Installed(release.clone()),
                 Err(err) => {
-                    eprintln!("goodminton: update failed: {err}");
+                    eprintln!("drop-in-badminton: update failed: {err}");
                     Status::Failed(format!("The update didn't install ({err})"))
                 }
             };
@@ -158,7 +158,7 @@ fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(10)))
         .timeout_global(Some(Duration::from_secs(10 * 60)))
-        .user_agent(concat!("goodminton/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("drop-in-badminton/", env!("CARGO_PKG_VERSION")))
         .build()
         .into()
 }
@@ -213,7 +213,7 @@ fn download_and_replace(release: &Release, progress: impl Fn(Option<f32>)) -> Re
     let total = resp.body().content_length();
     let mut reader = resp.body_mut().with_config().limit(500 * 1024 * 1024).reader();
 
-    let tmp = std::env::temp_dir().join(format!("goodminton-{}.download", release.version));
+    let tmp = std::env::temp_dir().join(format!("drop-in-badminton-{}.download", release.version));
     let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
     let (mut buf, mut done, mut last) = (vec![0u8; 64 * 1024], 0u64, Instant::now());
     loop {
@@ -276,9 +276,9 @@ mod tests {
     fn finds_this_platforms_file_in_a_release() {
         let body = r#"{"tag_name":"v0.3.1","body":"Faster rounds",
             "assets":[{"name":"other.zip","browser_download_url":"https://x/other"},
-                      {"name":"goodminton-windows-x86_64.exe","browser_download_url":"https://x/win"}]}"#;
-        let r = parse_release(body, "goodminton-windows-x86_64.exe").unwrap().unwrap();
+                      {"name":"drop-in-badminton-windows-x86_64.exe","browser_download_url":"https://x/win"}]}"#;
+        let r = parse_release(body, "drop-in-badminton-windows-x86_64.exe").unwrap().unwrap();
         assert_eq!(r, Release { version: "0.3.1".into(), url: "https://x/win".into(), notes: "Faster rounds".into() });
-        assert_eq!(parse_release(body, "goodminton-linux-x86_64").unwrap(), None);
+        assert_eq!(parse_release(body, "drop-in-badminton-linux-x86_64").unwrap(), None);
     }
 }

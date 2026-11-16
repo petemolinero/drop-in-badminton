@@ -85,7 +85,7 @@ const GAP: f32 = 10.0;
 /// Text size for every status chip, so they all share one spec.
 const CHIP_TEXT: f32 = 15.0;
 
-pub struct GoodmintonApp {
+pub struct DropInApp {
     state: AppState,
     hall: Hall,
     store: Store,
@@ -125,20 +125,20 @@ pub struct GoodmintonApp {
     toast_gap: Option<Rect>,
     /// Last toast's width, to centre it.
     toast_w: f32,
-    /// The "Update Goodminton" dialog is showing.
+    /// The "Update Drop-in Badminton" dialog is showing.
     update_open: bool,
     #[cfg(debug_assertions)]
     shot_requested: bool,
 }
 
-impl GoodmintonApp {
+impl DropInApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_fonts(theme::fonts());
         widgets::load_skill_finishes(&cc.egui_ctx);
         let (store, startup_error) = match Store::open_default() {
             Ok(store) => (store, None),
             Err(err) => {
-                eprintln!("goodminton: could not open database: {err}");
+                eprintln!("drop-in-badminton: could not open database: {err}");
                 (
                     Store::open_in_memory().expect("in-memory database"),
                     Some(format!("Couldn't open the database ({err}) — changes won't be saved")),
@@ -146,7 +146,7 @@ impl GoodmintonApp {
             }
         };
         let state = store.load().unwrap_or_else(|err| {
-            eprintln!("goodminton: could not load: {err}");
+            eprintln!("drop-in-badminton: could not load: {err}");
             AppState::default()
         });
         let mut app = Self {
@@ -206,7 +206,7 @@ impl GoodmintonApp {
 
     fn save(&mut self) {
         if let Err(err) = self.store.save(&mut self.state) {
-            eprintln!("goodminton: failed to save: {err}");
+            eprintln!("drop-in-badminton: failed to save: {err}");
         }
     }
 
@@ -343,7 +343,7 @@ fn pane(pal: &Palette) -> Frame {
         .shadow(pal.shadow(4))
 }
 
-impl eframe::App for GoodmintonApp {
+impl eframe::App for DropInApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.frame += 1;
@@ -448,12 +448,12 @@ impl eframe::App for GoodmintonApp {
         self.save();
     }
 
-    /// Debug builds: `GOODMINTON_SHOW=menu` right-clicks the first court slot.
+    /// Debug builds: `DROP_IN_BADMINTON_SHOW=menu` right-clicks the first court slot.
     #[cfg(debug_assertions)]
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
-        if !std::env::var("GOODMINTON_SHOW").is_ok_and(|s| s.contains("menu")) {
+        if !std::env::var("DROP_IN_BADMINTON_SHOW").is_ok_and(|s| s.contains("menu")) {
             // Screenshots shouldn't pick up hover from wherever the real mouse is.
-            if std::env::var_os("GOODMINTON_SCREENSHOT").is_some() {
+            if std::env::var_os("DROP_IN_BADMINTON_SCREENSHOT").is_some() {
                 raw.events.retain(|e| !matches!(e, egui::Event::PointerMoved(_)));
                 raw.events.push(egui::Event::PointerGone);
             }
@@ -485,14 +485,14 @@ impl eframe::App for GoodmintonApp {
 }
 
 // ===========================================================================
-// Development aid: `GOODMINTON_SCREENSHOT=out.ppm` captures one frame and exits.
-// `GOODMINTON_SHOW=settings|roster|drag|next|timer|done|history` sets up the screen first.
+// Development aid: `DROP_IN_BADMINTON_SCREENSHOT=out.ppm` captures one frame and exits.
+// `DROP_IN_BADMINTON_SHOW=settings|roster|drag|next|timer|done|history` sets up the screen first.
 
 #[cfg(debug_assertions)]
-impl GoodmintonApp {
+impl DropInApp {
     fn debug_screenshot(&mut self, ctx: &egui::Context) {
-        let Ok(path) = std::env::var("GOODMINTON_SCREENSHOT") else { return };
-        let show = std::env::var("GOODMINTON_SHOW").unwrap_or_default();
+        let Ok(path) = std::env::var("DROP_IN_BADMINTON_SCREENSHOT") else { return };
+        let show = std::env::var("DROP_IN_BADMINTON_SHOW").unwrap_or_default();
         if self.frame == 2 {
             self.settings_open = show.contains("settings");
             self.roster_open = show.contains("roster");
@@ -581,7 +581,7 @@ impl GoodmintonApp {
 // ===========================================================================
 // Title bar, ribbon & timer
 
-impl GoodmintonApp {
+impl DropInApp {
     fn shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.egui_wants_keyboard_input() {
             return;
@@ -636,7 +636,7 @@ impl GoodmintonApp {
         let tile = Rect::from_center_size(pos2(rect.left() + 13.0, y), Vec2::splat(26.0));
         p.rect_filled(tile, CornerRadius::same(6), pal.brand);
         p.text(tile.center(), Align2::CENTER_CENTER, icon::SHUTTLE_F, icon_font(17.0), pal.on_brand);
-        let name = p.text(pos2(tile.right() + 10.0, y), Align2::LEFT_CENTER, "Goodminton", semibold(15.0), pal.fg1);
+        let name = p.text(pos2(tile.right() + 10.0, y), Align2::LEFT_CENTER, "Drop-in Badminton", semibold(15.0), pal.fg1);
         p.line_segment(
             [pos2(name.right() + 12.0, y - 8.0), pos2(name.right() + 12.0, y + 8.0)],
             Stroke::new(1.0, pal.stroke1),
@@ -672,12 +672,6 @@ impl GoodmintonApp {
                 self.help = !self.help;
             }
             widgets::vdivider(ui, pal, 44.0);
-            if widgets::ribbon_button(ui, pal, icon::GROUP, "Roster", self.roster_open)
-                .on_hover_text("Roster & check-in")
-                .clicked()
-            {
-                self.roster_open = !self.roster_open;
-            }
             if widgets::ribbon_button(ui, pal, icon::HISTORY, "History", self.history.is_some())
                 .on_hover_text("Past game days")
                 .clicked()
@@ -706,27 +700,12 @@ impl GoodmintonApp {
             widgets::vdivider(ui, pal, 44.0);
             ui.add_space(6.0);
             self.next_round_button(ui, pal, now);
-            ui.add_space(14.0);
-            // The skill key, in the toolbar where everyone can see it.
-            let bh = 24.0;
-            let bw = widgets::badge_width(bh);
-            let col_w = bw + 8.0 + 108.0;
-            let (key, _) = ui.allocate_exact_size(vec2(col_w * 2.0 + 16.0, 66.0), Sense::hover());
-            let p = ui.painter();
-            p.rect(key, CornerRadius::same(8), pal.bg2, Stroke::new(1.0, pal.stroke2), StrokeKind::Inside);
-            for (k, skill) in Skill::ALL.iter().enumerate() {
-                let x = key.left() + 10.0 + (k % 2) as f32 * col_w;
-                let y = key.top() + 18.0 + (k / 2) as f32 * 30.0;
-                let b = Rect::from_min_size(pos2(x, y - bh / 2.0), vec2(bw, bh));
-                widgets::paint_skill_badge(p, pal, b, *skill);
-                p.text(pos2(b.right() + 8.0, y), Align2::LEFT_CENTER, skill.label(), semibold(15.0), pal.fg1);
-            }
         }
 
         // Center: the timer.
         let left_edge = left.min_rect().right() + 8.0;
         let right_edge = right.min_rect().left() - 8.0;
-        let width = 284.0_f32.min(right_edge - left_edge);
+        let width = 330.0_f32.min(right_edge - left_edge);
         let cx = card.center().x.clamp(left_edge + width / 2.0, right_edge - width / 2.0);
         let timer_rect = Rect::from_center_size(pos2(cx, card.center().y), vec2(width, card.height()));
         // Toasts sit in the open stretch between the menu buttons and the timer.
@@ -858,7 +837,7 @@ impl GoodmintonApp {
         let mut x = digits.center().x - width / 2.0;
         for ch in text.chars() {
             let w = if ch == ':' { colon } else { cell };
-            ui.painter().text(pos2(x + w / 2.0, digits.center().y - 11.0), Align2::CENTER_CENTER, ch, semibold(size), color);
+            ui.painter().text(pos2(x + w / 2.0, digits.center().y - 14.0), Align2::CENTER_CENTER, ch, semibold(size), color);
             x += w;
         }
         let (status, glyph, bg, fg) = match (finished, timer) {
@@ -877,9 +856,9 @@ impl GoodmintonApp {
         } else {
             status.to_owned()
         };
-        widgets::paint_badge(ui.painter(), pos2(digits.center().x, digits.center().y + 30.0), Align2::CENTER_CENTER, Some(glyph), &status, 13.0, bg, fg);
-        ui.add_space(4.0);
-        let pencil = widgets::icon_button(ui, pal, icon::EDIT, 30.0, false).on_hover_text("Change the time");
+        widgets::paint_badge(ui.painter(), pos2(digits.center().x, digits.center().y + 33.0), Align2::CENTER_CENTER, Some(glyph), &status, 13.0, bg, fg);
+        ui.add_space(6.0);
+        let pencil = widgets::button(ui, pal, ButtonKind::Secondary, Some(icon::EDIT), "Edit", 30.0).on_hover_text("Change the time");
         if pencil.clicked() || digits_resp.secondary_clicked() {
             self.time_edit = clock(remaining);
         }
@@ -894,7 +873,7 @@ impl GoodmintonApp {
     fn time_menu(&mut self, popup: egui::Popup<'_>, pal: &Palette, remaining: i64, now: i64) {
         // Clicking into the box mustn't close it.
         popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-            ui.set_min_width(220.0);
+            ui.set_width(200.0);
             ui.spacing_mut().button_padding = vec2(10.0, 7.0);
             ui.label(RichText::new("Time left").font(semibold(15.0)).color(pal.fg1));
             ui.label(RichText::new("Type minutes, or m:ss").font(regular(13.0)).color(pal.fg3));
@@ -902,7 +881,7 @@ impl GoodmintonApp {
                 egui::TextEdit::singleline(&mut self.time_edit)
                     .font(regular(18.0))
                     .margin(Margin::symmetric(10, 6))
-                    .desired_width(f32::INFINITY),
+                    .desired_width(200.0),
             );
             if !edit.has_focus() && !edit.lost_focus() && ui.memory(|m| m.focused().is_none()) {
                 edit.request_focus();
@@ -933,7 +912,7 @@ impl GoodmintonApp {
 // ===========================================================================
 // Courts and on-deck cards
 
-impl GoodmintonApp {
+impl DropInApp {
     fn arena(&mut self, ui: &mut Ui, pal: &Palette, now: i64) {
         let full = ui.available_rect_before_wrap();
         let n = self.state.session.courts.len().max(1);
@@ -1130,13 +1109,6 @@ impl GoodmintonApp {
         // The court's sign hangs on the back wall, beside the floodlights.
         let hy = rect.top() + view.top / 2.0 + 1.0;
         widgets::court_sign(&p, pal, pos2(rect.left() + 8.0, hy), i + 1, (view.top * 0.5).round());
-        // The round's state lives under the timer; a court only gets a pill
-        // when there's something to say about that court.
-        let remaining = self.state.timer_remaining_ms(now);
-        let last_points = occupied && !time_up && matches!(self.state.session.timer, Timer::Running { .. }) && remaining <= 120_000;
-        if last_points {
-            widgets::paint_badge(&p, pos2(rect.right() - 10.0, hy), Align2::RIGHT_CENTER, Some(icon::HOURGLASS_F), "Last points", CHIP_TEXT, pal.warning_subtle, pal.warning_fg);
-        }
 
         // Team A stands on the far half and team B on the near half, either
         // side of the net; every card is full size whatever its distance.
@@ -1302,7 +1274,7 @@ impl GoodmintonApp {
 // ===========================================================================
 // Waiting pool
 
-impl GoodmintonApp {
+impl DropInApp {
     /// The right panel's tabs: the waiting list, or the roster for check-in.
     fn side_tabs(&mut self, ui: &mut Ui, pal: &Palette, now: i64) {
         let waiting = self.state.waiting_list(now).iter().filter(|id| !self.state.session.present[id].resting).count();
@@ -1593,7 +1565,7 @@ impl GoodmintonApp {
 // ===========================================================================
 // Roster pane
 
-impl GoodmintonApp {
+impl DropInApp {
     fn roster(&mut self, ui: &mut Ui, pal: &Palette, now: i64) {
         let ctx = ui.ctx().clone();
         let extra = format!("{} checked in · {} players", self.state.session.present.len(), self.state.players.len());
@@ -1866,7 +1838,7 @@ impl GoodmintonApp {
 // ===========================================================================
 // Dialogs & toast
 
-impl GoodmintonApp {
+impl DropInApp {
     fn dialog_frame(pal: &Palette) -> Frame {
         Frame::NONE
             .fill(pal.bg1)
@@ -2019,7 +1991,7 @@ impl GoodmintonApp {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 ui.add_space(6.0);
-                ui.label(RichText::new(format!("Goodminton {}", update::VERSION)).font(regular(15.0)).color(pal.fg1));
+                ui.label(RichText::new(format!("Drop-in Badminton {}", update::VERSION)).font(regular(15.0)).color(pal.fg1));
                 ui.label(RichText::new(detail).font(regular(13.0)).color(pal.fg3));
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -2090,11 +2062,11 @@ impl GoodmintonApp {
                 }
                 let body = match &status {
                     UpdateStatus::Installed(_) => {
-                        "The new version is installed. Goodminton will close and open again in a few seconds."
+                        "The new version is installed. Drop-in Badminton will close and open again in a few seconds."
                     }
                     UpdateStatus::Failed(_) => "",
                     _ => {
-                        "Goodminton will download the update, then restart. Your roster, courts, timer and history \
+                        "Drop-in Badminton will download the update, then restart. Your roster, courts, timer and history \
                          are kept, and a backup of your data is saved first."
                     }
                 };
@@ -2166,9 +2138,9 @@ impl GoodmintonApp {
         self.dirty = false;
         let dir = crate::model::data_dir().join("backups");
         if std::fs::create_dir_all(&dir).is_ok() {
-            let name = format!("goodminton-{}-{}.db", update::VERSION, chrono::Local::now().format("%Y%m%d-%H%M%S"));
+            let name = format!("drop-in-badminton-{}-{}.db", update::VERSION, chrono::Local::now().format("%Y%m%d-%H%M%S"));
             if let Err(err) = self.store.backup_to(&dir.join(name)) {
-                eprintln!("goodminton: backup before update failed: {err}");
+                eprintln!("drop-in-badminton: backup before update failed: {err}");
             }
             prune_backups(&dir, 10);
         }
@@ -2230,7 +2202,7 @@ impl GoodmintonApp {
         self.save();
         self.dirty = false;
         let days = self.store.days().unwrap_or_else(|err| {
-            eprintln!("goodminton: history: {err}");
+            eprintln!("drop-in-badminton: history: {err}");
             Vec::new()
         });
         let mut view = HistoryView {
@@ -2587,7 +2559,7 @@ fn help_history() -> Help {
     )
 }
 
-impl GoodmintonApp {
+impl DropInApp {
     fn help_courts(&self) -> Help {
         let s = &self.state.settings;
         let start = format!("Press the round play button to start the {}-minute timer.", s.round_minutes);
@@ -2644,7 +2616,7 @@ impl GoodmintonApp {
 // ===========================================================================
 // Right-click menu for any player, wherever they appear
 
-impl GoodmintonApp {
+impl DropInApp {
     /// Attach the player menu to `resp` (opens on right-click).
     fn player_menu(&mut self, resp: &egui::Response, pal: &Palette, id: PlayerId) {
         let Some(player) = self.state.players.get(&id) else { return };
@@ -2789,7 +2761,7 @@ impl GoodmintonApp {
             .backdrop_color(pal.scrim)
             .show(ctx, |ui| {
                 ui.set_width(880.0);
-                if Self::dialog_title(ui, pal, "How Goodminton works", None) {
+                if Self::dialog_title(ui, pal, "How Drop-in Badminton works", None) {
                     self.help = false;
                 }
                 ui.add_space(8.0);

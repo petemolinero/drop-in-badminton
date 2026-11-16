@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Publish a new version: bumps Cargo.toml, commits, tags, and pushes.
-# GitHub Actions then builds it, and every copy of Goodminton offers the update.
+# GitHub Actions then builds it, and every copy of Drop-in Badminton offers the update.
 #
 #   tools/release.sh 0.2.0 "Courts can be renamed" "Fixed the timer sound"
 #

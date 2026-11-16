@@ -1,4 +1,4 @@
-# Goodminton
+# Drop-in Badminton
 
 Court rotation board for pickup badminton nights, written in Rust (egui/eframe).
 Built for a laptop mirrored to a big TV: courts big at the top, the "up next"
@@ -11,8 +11,8 @@ cargo run --release
 ```
 
 Everything is saved automatically to a SQLite database at
-`~/.local/share/goodminton/goodminton.db` (on Windows,
-`%APPDATA%\goodminton\goodminton\data\goodminton.db`):
+`~/.local/share/drop-in-badminton/drop-in-badminton.db` (on Windows,
+`%APPDATA%\drop-in-badminton\drop-in-badminton\data\drop-in-badminton.db`):
 
 - **Roster**: everyone who has ever come. It carries over from week to week.
   Removing someone archives them, so their past games stay in History.
@@ -64,9 +64,9 @@ until the next round, so they don't get placed straight back.
 
 ## Installing and updating
 
-Download `goodminton-windows-x86_64.exe` from the
+Download `drop-in-badminton-windows-x86_64.exe` from the
 [latest release](https://github.com/petemolinero/drop-in-badminton/releases/latest),
-put it somewhere permanent (e.g. a `Goodminton` folder in Documents) and make a
+put it somewhere permanent (e.g. a `Drop-in Badminton` folder in Documents) and make a
 desktop shortcut. Windows will warn once that the app is unrecognised (it isn't
 code-signed): click **More info → Run anyway**.
 
@@ -87,7 +87,7 @@ pushes. GitHub Actions (`.github/workflows/release.yml`) builds Windows and
 Linux binaries and publishes the release; the notes become "What's new" in the
 app's update dialog. Each copy of the app picks it up the next time it checks.
 
-Updates are off in debug builds and when `GOODMINTON_NO_UPDATE` is set.
+Updates are off in debug builds and when `DROP_IN_BADMINTON_NO_UPDATE` is set.
 
 ## Development
 
@@ -100,5 +100,7 @@ command ribbon over floating cards on a neutral canvas, in light or dark.
 
 - **Font:** Segoe UI is used when it's installed (it can't be bundled); otherwise the embedded Roboto.
 - **Icons:** a small subset of [Fluent System Icons](https://github.com/microsoft/fluentui-system-icons)
-  (MIT) in `assets/fonts/FluentIcons-Goodminton.ttf`. To add an icon, edit and rerun
+  (MIT) in `assets/fonts/FluentIcons-DropIn.ttf`. To add an icon, edit and rerun
   `tools/build_icons.py` (needs `fonttools`), then copy the printed constants into `src/theme.rs`.
+  Then run `tools/shuttle_glyph.py assets/fonts/FluentIcons-DropIn.ttf`: Fluent has no
+  shuttlecock, so it draws one over the `SHUTTLE`/`SHUTTLE_F` slots.

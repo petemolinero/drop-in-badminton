@@ -9,7 +9,7 @@ use egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId,
 use crate::model::Skill;
 
 /// Glyphs from the embedded Fluent System Icons subset
-/// (`assets/fonts/FluentIcons-Goodminton.ttf`, built by `tools/build_icons.py`).
+/// (`assets/fonts/FluentIcons-DropIn.ttf`, built by `tools/build_icons.py`).
 /// `*_F` are the filled variants.
 #[allow(dead_code)]
 pub mod icon {
@@ -133,7 +133,7 @@ pub fn fonts() -> FontDefinitions {
             add(BOLD, FontData::from_static(include_bytes!("../assets/fonts/Roboto-Bold.ttf")));
         }
     }
-    add(ICONS, FontData::from_static(include_bytes!("../assets/fonts/FluentIcons-Goodminton.ttf")));
+    add(ICONS, FontData::from_static(include_bytes!("../assets/fonts/FluentIcons-DropIn.ttf")));
 
     let prop = fonts.families.entry(FontFamily::Proportional).or_default();
     prop.insert(0, "ui".to_owned());

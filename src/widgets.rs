@@ -816,7 +816,7 @@ pub fn short_duration(ms: i64) -> String {
 }
 
 pub fn unique(id: impl std::hash::Hash + std::fmt::Debug) -> Id {
-    Id::unique(("goodminton", id))
+    Id::unique(("drop-in-badminton", id))
 }
 
 // ===========================================================================

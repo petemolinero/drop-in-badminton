@@ -293,7 +293,7 @@ impl AppState {
 // Storage location
 
 pub fn data_dir() -> PathBuf {
-    directories::ProjectDirs::from("app", "goodminton", "goodminton")
+    directories::ProjectDirs::from("app", "drop-in-badminton", "drop-in-badminton")
         .map(|d| d.data_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."))
 }

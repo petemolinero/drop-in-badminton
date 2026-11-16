@@ -1,4 +1,4 @@
-# Builds Goodminton and publishes a GitHub Release when a version tag is pushed.
+# Builds Drop-in Badminton and publishes a GitHub Release when a version tag is pushed.
 # The app's Update button downloads the file for its platform from the latest release.
 #
 #   tools/release.sh 0.2.0 "What changed"
@@ -18,11 +18,11 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            built: target/release/goodminton.exe
-            asset: goodminton-windows-x86_64.exe
+            built: target/release/drop-in-badminton.exe
+            asset: drop-in-badminton-windows-x86_64.exe
           - os: ubuntu-latest
-            built: target/release/goodminton
-            asset: goodminton-linux-x86_64
+            built: target/release/drop-in-badminton
+            asset: drop-in-badminton-linux-x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -70,6 +70,6 @@ jobs:
           cat notes.md
       - uses: softprops/action-gh-release@v2
         with:
-          name: Goodminton ${{ github.ref_name }}
+          name: Drop-in Badminton ${{ github.ref_name }}
           body_path: notes.md
           files: dist/*

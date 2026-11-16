@@ -106,7 +106,7 @@ fn skill_from_str(s: &str) -> Skill {
 }
 
 pub fn db_path() -> PathBuf {
-    data_dir().join("goodminton.db")
+    data_dir().join("drop-in-badminton.db")
 }
 
 impl Store {
@@ -115,9 +115,28 @@ impl Store {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
+        Self::adopt_old_name(&path);
         let store = Self::open(&path)?;
         store.import_legacy_json(&data_dir().join("state.json"));
         Ok(store)
+    }
+
+    /// The app used to be called Goodminton: on first run under the new name,
+    /// bring that database over (a consistent copy; the old file is kept).
+    fn adopt_old_name(path: &Path) {
+        if path.exists() {
+            return;
+        }
+        let Some(old_dir) = directories::ProjectDirs::from("app", "goodminton", "goodminton") else { return };
+        let old = old_dir.data_dir().join("goodminton.db");
+        if !old.exists() {
+            return;
+        }
+        let copied = Connection::open(&old).and_then(|c| c.execute("VACUUM INTO ?1", [path.to_string_lossy()]));
+        if let Err(err) = copied {
+            eprintln!("drop-in-badminton: could not copy {old:?}: {err}");
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
@@ -171,7 +190,7 @@ impl Store {
         let mut state: AppState = match serde_json::from_str(&text) {
             Ok(s) => s,
             Err(err) => {
-                eprintln!("goodminton: could not import {path:?}: {err}");
+                eprintln!("drop-in-badminton: could not import {path:?}: {err}");
                 return;
             }
         };
@@ -192,7 +211,7 @@ impl Store {
             Ok(()) => {
                 let _ = std::fs::rename(path, path.with_extension("json.imported"));
             }
-            Err(err) => eprintln!("goodminton: import failed: {err}"),
+            Err(err) => eprintln!("drop-in-badminton: import failed: {err}"),
         }
     }
 
@@ -204,7 +223,7 @@ impl Store {
         if let Some(json) = self.meta("session")? {
             match serde_json::from_str(&json) {
                 Ok(session) => state.session = session,
-                Err(err) => eprintln!("goodminton: could not restore session: {err}"),
+                Err(err) => eprintln!("drop-in-badminton: could not restore session: {err}"),
             }
         }
         let mut stmt = self.conn.prepare(
