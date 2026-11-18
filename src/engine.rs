@@ -205,13 +205,17 @@ impl AppState {
         }
     }
 
-    /// Start a fresh game day: nobody is present and the courts are empty.
-    /// The roster carries over. Its clock reads `start_ms` and starts running
-    /// at wall time `wall`.
+    /// Start a fresh game day: the courts are empty and only players set to
+    /// check in automatically are here. The roster carries over. Its clock
+    /// reads `start_ms` and starts running at wall time `wall`.
     pub fn new_day(&mut self, start_ms: i64, wall: i64) {
         self.session = Session::default();
         self.session.clock = SessionClock::starting(start_ms, wall);
         self.sync_court_count(start_ms);
+        let regulars: Vec<PlayerId> = self.players.values().filter(|p| p.auto_check_in).map(|p| p.id).collect();
+        for id in regulars {
+            self.check_in(id, start_ms);
+        }
     }
 
     /// Log the game currently on court `c` as finished at `now`.
@@ -746,6 +750,11 @@ mod tests {
         s.new_day(7 * 86_400_000, 0);
         assert!(s.session.present.is_empty() && s.session.games.is_empty());
         assert!(s.players.contains_key(&ids[0]), "roster carries over");
+        // Regulars are checked in to every new session from its start.
+        s.players.get_mut(&late).unwrap().auto_check_in = true;
+        s.new_day(8 * 86_400_000, 0);
+        assert_eq!(s.session.present.keys().copied().collect::<Vec<_>>(), vec![late]);
+        assert_eq!(s.session.attendance[0].in_ms, 8 * 86_400_000);
     }
 
     #[test]

@@ -8,6 +8,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 directories = "6"
 eframe = "0.37"
 egui = "0.37"
+rfd = "0.18.0"
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 self-replace = "1.5.1"
 serde = { version = "1.0.229", features = ["derive"] }

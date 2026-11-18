@@ -27,6 +27,7 @@ use crate::update::{self, Release, Status as UpdateStatus, Updater};
 use crate::widgets::{self, ButtonKind, Help, clock, short_duration, unique};
 
 mod analytics_view;
+mod games_view;
 mod players_view;
 
 /// The dashboard sidebar's tabs.
@@ -44,6 +45,8 @@ enum View {
     Dashboard,
     /// Every player ever, as an editable table.
     Players,
+    /// Every game ever played; read-only unless unlocked.
+    Games,
     /// Headline numbers and charts across every session.
     Analytics,
 }
@@ -151,6 +154,7 @@ pub struct DropInApp {
     new_skill: Skill,
     new_from: String,
     new_found_via: String,
+    new_auto: bool,
     search: String,
     /// Filter for the waiting list.
     waiting_search: String,
@@ -164,6 +168,7 @@ pub struct DropInApp {
     save_gen: u64,
     stats: Option<(u64, std::rc::Rc<Stats>)>,
     players_view: players_view::PlayersView,
+    games_view: games_view::GamesView,
     /// Player being renamed, the edit buffer, and whether the box still needs focus.
     renaming: Option<(PlayerId, String, bool)>,
     snackbar: Option<Snackbar>,
@@ -228,6 +233,7 @@ impl DropInApp {
             new_skill: Skill::Intermediate,
             new_from: String::new(),
             new_found_via: String::new(),
+            new_auto: false,
             search: String::new(),
             waiting_search: String::new(),
             time_edit: String::new(),
@@ -236,6 +242,7 @@ impl DropInApp {
             save_gen: 0,
             stats: None,
             players_view: Default::default(),
+            games_view: Default::default(),
             renaming: None,
             snackbar: None,
             confirm: None,
@@ -345,8 +352,14 @@ impl DropInApp {
         self.save();
         self.dirty = false;
         self.side_tab = SideTab::Roster;
+        let when = fmt_date(start_ms, "%a, %b %-d, %-I:%M %p");
+        let text = match self.state.session.present.len() {
+            0 => format!("New session · {when} — check players in as they arrive"),
+            1 => format!("New session · {when} — 1 regular checked in automatically"),
+            n => format!("New session · {when} — {n} regulars checked in automatically"),
+        };
         self.snackbar = Some(Snackbar {
-            text: format!("New session · {} — check players in as they arrive", fmt_date(start_ms, "%a, %b %-d, %-I:%M %p")),
+            text,
             undo: Some(before),
             born: ctx.input(|i| i.time),
         });
@@ -389,6 +402,29 @@ impl DropInApp {
             undo: None,
             born: ctx.input(|i| i.time),
         });
+    }
+
+    /// Ask where to save a table as a CSV file, then write it.
+    fn export_csv(&mut self, ctx: &egui::Context, file_name: &str, header: &[&str], rows: &[Vec<String>]) {
+        let Some(mut path) = rfd::FileDialog::new()
+            .set_title("Export as CSV")
+            .set_file_name(file_name)
+            .add_filter("CSV spreadsheet", &["csv"])
+            .save_file()
+        else {
+            return; // cancelled
+        };
+        if path.extension().is_none() {
+            path.set_extension("csv");
+        }
+        let shown = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+        match std::fs::write(&path, crate::csv::table(header, rows)) {
+            Ok(()) => {
+                let rows = if rows.len() == 1 { "1 row".to_owned() } else { format!("{} rows", rows.len()) };
+                self.toast(ctx, format!("Exported {rows} to {shown}"));
+            }
+            Err(err) => self.toast(ctx, format!("Couldn't save {shown}: {err}")),
+        }
     }
 
     fn undo(&mut self) {
@@ -502,6 +538,7 @@ impl eframe::App for DropInApp {
                 .frame(Frame::NONE.fill(pal.canvas).inner_margin(Margin { left: g, right: g, top: 4, bottom: g }))
                 .show(ui, |ui| match view {
                     View::Players => self.players_view(ui, &pal),
+                    View::Games => self.games_view(ui, &pal),
                     _ => self.analytics_view(ui, &pal),
                 });
         }
@@ -654,6 +691,10 @@ impl DropInApp {
             }
             if show.contains("analytics") {
                 self.view = View::Analytics;
+            }
+            if show.contains("games") {
+                self.view = View::Games;
+                self.games_view.unlocked = show.contains("unlocked");
             }
             if show.contains("sessiontime") {
                 self.session_edit = "0:30:00".into();
@@ -808,6 +849,7 @@ impl DropInApp {
         for (view, glyph, label) in [
             (View::Dashboard, icon::BOARD, "Dashboard"),
             (View::Players, icon::TABLE, "Players"),
+            (View::Games, icon::SHUTTLE, "Games"),
             (View::Analytics, icon::CHART, "Analytics"),
         ] {
             let text = ui.painter().layout_no_wrap(label.to_owned(), semibold(14.0), pal.fg1);
@@ -827,6 +869,8 @@ impl DropInApp {
             p.galley_with_override_text_color(pos2(r.left() + 34.0, y - text.size().y / 2.0 - 1.0), text, ink);
             if resp.clicked() && !selected {
                 self.view = view;
+                // History is only ever unlocked on purpose, one visit at a time.
+                self.games_view.unlocked = false;
                 // Fresh numbers: write out anything still waiting to be saved.
                 if self.dirty {
                     self.save();
@@ -1993,7 +2037,7 @@ impl DropInApp {
         // The usual answers, one tap each.
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
-            for choice in ["A friend", "Instagram", "Facebook", "Meetup", "Google", "Walked by"] {
+            for choice in ["A friend", "Instagram", "Facebook", "Heard about it at church", "Google", "Walked by"] {
                 let picked = self.new_found_via.trim().eq_ignore_ascii_case(choice);
                 let fill = if picked { pal.brand_subtle } else { pal.bg1 };
                 let ink = if picked { pal.on_brand_subtle } else { pal.fg2 };
@@ -2006,6 +2050,18 @@ impl DropInApp {
                     self.new_found_via = if picked { String::new() } else { choice.to_owned() };
                 }
             }
+        });
+        ui.add_space(14.0);
+
+        // Regulars: checked in to every new session without asking.
+        ui.horizontal(|ui| {
+            widgets::switch(ui, pal, &mut self.new_auto);
+            ui.add_space(4.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(RichText::new("Auto check-in").font(semibold(14.0)).color(pal.fg1));
+                ui.label(RichText::new("Checked in at the start of every new session").font(regular(13.0)).color(pal.fg3));
+            });
         });
         ui.add_space(16.0);
 
@@ -2037,6 +2093,7 @@ impl DropInApp {
             if p.found_via.is_empty() {
                 p.found_via = found_via;
             }
+            p.auto_check_in |= self.new_auto;
         }
         let checking_in = !roster_only;
         if checking_in {
@@ -2046,6 +2103,7 @@ impl DropInApp {
         self.new_name.clear();
         self.new_from.clear();
         self.new_found_via.clear();
+        self.new_auto = false;
         let message = match (exists.is_some(), checking_in) {
             (true, true) => format!("{name} is already on the roster — checked in"),
             (true, false) => format!("{name} is already on the roster"),

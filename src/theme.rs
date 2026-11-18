@@ -56,6 +56,9 @@ pub mod icon {
     pub const TABLE: &str = "\u{f75e}";
     pub const DOWN: &str = "\u{f149}";
     pub const ARCHIVE: &str = "\u{f13a}";
+    pub const LOCK: &str = "\u{e790}";
+    pub const LOCK_OPEN: &str = "\u{e796}";
+    pub const EXPORT: &str = "\u{f0527}";
     pub const PLAY_F: &str = "\u{100000}";
     pub const PAUSE_F: &str = "\u{100001}";
     pub const NEXT_F: &str = "\u{100002}";

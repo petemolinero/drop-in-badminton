@@ -9,7 +9,8 @@ REG = dict(PLAY='play',PAUSE='pause',REPLAY='arrow_counterclockwise',NEXT='next'
   NIGHT='weather_moon',CHECK='checkmark',HISTORY='history',CALENDAR='calendar_ltr',CLOCK='clock',
   CHEVRON_UP='chevron_up',CHEVRON_DOWN='chevron_down',INFO='info',WARNING='warning',CHECK_CIRCLE='checkmark_circle',
   TIMER='timer',PERSON='person',ARROW_SWAP='arrow_swap',QUESTION='question_circle',EDIT='edit',PERSON_STAR='person_star',DOWNLOAD='arrow_download',
-  BOARD='board',CHART='data_bar_vertical',TABLE='table',DOWN='arrow_down',ARCHIVE='archive')
+  BOARD='board',CHART='data_bar_vertical',TABLE='table',DOWN='arrow_down',ARCHIVE='archive',
+  LOCK='lock_closed',LOCK_OPEN='lock_open',EXPORT='document_arrow_down')
 FIL = dict(PLAY_F='play',PAUSE_F='pause',NEXT_F='next',SHUTTLE_F='sport',GROUP_F='people',CHECK_CIRCLE_F='checkmark_circle',
   INFO_F='info',WARNING_F='warning',HOURGLASS_F='hourglass',ARROW_UP_F='arrow_circle_up',TIMER_F='timer',QUESTION_F='question_circle',DOWNLOAD_F='arrow_download')
 out = []

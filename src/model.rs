@@ -81,6 +81,9 @@ pub struct Player {
     /// Where they're from: a neighbourhood or town.
     #[serde(default)]
     pub from: String,
+    /// Checked in automatically whenever a new session starts (regulars).
+    #[serde(default)]
+    pub auto_check_in: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -397,6 +400,7 @@ impl AppState {
                 skill,
                 lifetime_games: 0,
                 found_via: String::new(),
+                auto_check_in: false,
                 from: String::new(),
             },
         );

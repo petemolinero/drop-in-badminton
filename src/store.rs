@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS players (
     lifetime_games INTEGER NOT NULL DEFAULT 0,
     archived       INTEGER NOT NULL DEFAULT 0,
     found_via      TEXT    NOT NULL DEFAULT '',
-    home           TEXT    NOT NULL DEFAULT ''
+    home           TEXT    NOT NULL DEFAULT '',
+    auto_check_in  INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -105,6 +106,7 @@ pub struct RawPlayer {
     pub lifetime_games: u32,
     pub found_via: String,
     pub from: String,
+    pub auto_check_in: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -114,6 +116,18 @@ pub struct RawGame {
     pub ended_ms: i64,
     /// (player, team 0 or 1)
     pub players: Vec<(PlayerId, u8)>,
+}
+
+/// One game as logged, for the Games view.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoggedGame {
+    /// Its database id (stable for past sessions; the current session's games
+    /// are rewritten, and get new ids, on every save).
+    pub id: i64,
+    pub day: i64,
+    /// Its place among its session's games, matching `Session::games`.
+    pub index: usize,
+    pub record: GameRecord,
 }
 
 /// The whole database, flattened, for statistics.
@@ -196,6 +210,7 @@ impl Store {
         for (column, ddl) in [
             ("found_via", "ALTER TABLE players ADD COLUMN found_via TEXT NOT NULL DEFAULT ''"),
             ("home", "ALTER TABLE players ADD COLUMN home TEXT NOT NULL DEFAULT ''"),
+            ("auto_check_in", "ALTER TABLE players ADD COLUMN auto_check_in INTEGER NOT NULL DEFAULT 0"),
         ] {
             if !columns.iter().any(|c| c == column) {
                 conn.execute_batch(ddl)?;
@@ -273,7 +288,7 @@ impl Store {
             }
         }
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, skill, lifetime_games, found_via, home FROM players WHERE archived = 0",
+            "SELECT id, name, skill, lifetime_games, found_via, home, auto_check_in FROM players WHERE archived = 0",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(Player {
@@ -283,6 +298,7 @@ impl Store {
                 lifetime_games: r.get(3)?,
                 found_via: r.get(4)?,
                 from: r.get(5)?,
+                auto_check_in: r.get(6)?,
             })
         })?;
         for p in rows {
@@ -319,14 +335,15 @@ impl Store {
 
     fn save_players(tx: &Transaction, players: &BTreeMap<PlayerId, Player>) -> rusqlite::Result<()> {
         let mut upsert = tx.prepare_cached(
-            "INSERT INTO players(id, name, skill, lifetime_games, archived, found_via, home) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)
+            "INSERT INTO players(id, name, skill, lifetime_games, archived, found_via, home, auto_check_in)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7)
              ON CONFLICT(id) DO UPDATE SET name = excluded.name, skill = excluded.skill,
                  lifetime_games = excluded.lifetime_games, archived = 0,
-                 found_via = excluded.found_via, home = excluded.home",
+                 found_via = excluded.found_via, home = excluded.home, auto_check_in = excluded.auto_check_in",
         )?;
         // A player added from the Players view is only kept once they have a name.
         for p in players.values().filter(|p| !p.name.trim().is_empty()) {
-            upsert.execute(params![p.id as i64, p.name, skill_to_str(p.skill), p.lifetime_games, p.found_via.trim(), p.from.trim()])?;
+            upsert.execute(params![p.id as i64, p.name, skill_to_str(p.skill), p.lifetime_games, p.found_via.trim(), p.from.trim(), p.auto_check_in])?;
         }
         // Anyone no longer on the roster is archived, keeping their history.
         let ids: Vec<i64> = {
@@ -414,7 +431,7 @@ impl Store {
     /// player ever (archived ones too) and every session's attendance and games.
     pub fn everything(&self) -> rusqlite::Result<RawHistory> {
         let mut h = RawHistory::default();
-        let mut stmt = self.conn.prepare("SELECT id, name, skill, lifetime_games, found_via, home FROM players")?;
+        let mut stmt = self.conn.prepare("SELECT id, name, skill, lifetime_games, found_via, home, auto_check_in FROM players")?;
         h.players = stmt
             .query_map([], |r| {
                 Ok(RawPlayer {
@@ -424,6 +441,7 @@ impl Store {
                     lifetime_games: r.get(3)?,
                     found_via: r.get(4)?,
                     from: r.get(5)?,
+                    auto_check_in: r.get(6)?,
                 })
             })?
             .collect::<Result<_, _>>()?;
@@ -462,12 +480,79 @@ impl Store {
         Ok(h)
     }
 
+    /// Every game ever played, session by session, in the order played.
+    pub fn game_log(&self) -> rusqlite::Result<Vec<LoggedGame>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT g.id, g.game_day_id, g.round, g.court, g.started_at, g.ended_at, gp.player_id, gp.slot
+             FROM games g LEFT JOIN game_players gp ON gp.game_id = g.id
+             ORDER BY g.game_day_id, g.id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, u32>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, Option<i64>>(6)?,
+                r.get::<_, Option<i64>>(7)?,
+            ))
+        })?;
+        let mut log: Vec<LoggedGame> = Vec::new();
+        for row in rows {
+            let (id, day, round, court, start, end, player, slot) = row?;
+            if log.last().is_none_or(|g| g.id != id) {
+                let index = match log.last() {
+                    Some(g) if g.day == day => g.index + 1,
+                    _ => 0,
+                };
+                let record = GameRecord { round, court: court.max(0) as usize, started_ms: start, ended_ms: end, players: EMPTY_SLOTS };
+                log.push(LoggedGame { id, day, index, record });
+            }
+            if let (Some(p), Some(slot)) = (player, slot) {
+                if let Some(s) = log.last_mut().expect("pushed above").record.players.get_mut(slot as usize) {
+                    *s = Some(p as PlayerId);
+                }
+            }
+        }
+        Ok(log)
+    }
+
+    /// Rewrite a game from a past session (the current session's games are
+    /// edited in memory and saved with it instead).
+    pub fn update_game(&self, id: i64, g: &GameRecord) -> rusqlite::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE games SET round = ?2, court = ?3, started_at = ?4, ended_at = ?5 WHERE id = ?1",
+            params![id, g.round, g.court as i64, g.started_ms, g.ended_ms],
+        )?;
+        tx.execute("DELETE FROM game_players WHERE game_id = ?1", [id])?;
+        for (slot, pid) in g.players.iter().enumerate() {
+            if let Some(pid) = pid {
+                tx.execute(
+                    "INSERT OR IGNORE INTO game_players(game_id, player_id, team, slot)
+                     SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM players WHERE id = ?2)",
+                    params![id, *pid as i64, (slot / 2) as i64, slot as i64],
+                )?;
+            }
+        }
+        tx.commit()
+    }
+
+    /// Remove a game from a past session.
+    pub fn delete_game(&self, id: i64) -> rusqlite::Result<()> {
+        self.conn.execute("DELETE FROM games WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
     /// Edit a player who's no longer on the roster (roster players are saved
     /// from the app state instead).
     pub fn update_archived_player(&self, p: &Player) -> rusqlite::Result<()> {
         self.conn.execute(
-            "UPDATE players SET name = ?2, skill = ?3, found_via = ?4, home = ?5 WHERE id = ?1 AND archived = 1",
-            params![p.id as i64, p.name, skill_to_str(p.skill), p.found_via.trim(), p.from.trim()],
+            "UPDATE players SET name = ?2, skill = ?3, found_via = ?4, home = ?5, auto_check_in = ?6
+             WHERE id = ?1 AND archived = 1",
+            params![p.id as i64, p.name, skill_to_str(p.skill), p.found_via.trim(), p.from.trim(), p.auto_check_in],
         )?;
         Ok(())
     }
@@ -582,12 +667,42 @@ mod tests {
         let store = Store::init(conn).unwrap();
         let mut s = store.load().unwrap();
         assert_eq!((s.players[&1].from.as_str(), s.players[&1].found_via.as_str()), ("", ""));
+        assert!(!s.players[&1].auto_check_in);
         let ann = s.players.get_mut(&1).unwrap();
         ann.from = "Leith ".into();
         ann.found_via = "A friend".into();
+        ann.auto_check_in = true;
         store.save(&mut s).unwrap();
         let ann = &store.load().unwrap().players[&1];
-        assert_eq!((ann.from.as_str(), ann.found_via.as_str()), ("Leith", "A friend"));
+        assert_eq!((ann.from.as_str(), ann.found_via.as_str(), ann.auto_check_in), ("Leith", "A friend", true));
+    }
+
+    #[test]
+    fn past_games_can_be_edited_and_removed() {
+        let store = Store::open_in_memory().unwrap();
+        let mut s = AppState::default();
+        let ids: Vec<PlayerId> = ["Ann", "Bo", "Cy", "Di", "Ed"].iter().map(|n| s.add_player(n, Skill::Intermediate)).collect();
+        s.session.clock = SessionClock::starting(1_000, 0);
+        for &id in &ids {
+            s.session.attendance.push(Attendance { player: id, in_ms: 1_000, out_ms: None });
+        }
+        let game = |court, players| GameRecord { round: 1, court, started_ms: 1_000, ended_ms: 901_000, players };
+        s.session.games.push(game(0, [Some(ids[0]), Some(ids[1]), Some(ids[2]), Some(ids[3])]));
+        s.session.games.push(game(1, [Some(ids[4]), None, None, None]));
+        store.save(&mut s).unwrap();
+
+        let log = store.game_log().unwrap();
+        assert_eq!(log.iter().map(|g| g.index).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(log[0].record, s.session.games[0]);
+
+        let mut edited = log[0].record.clone();
+        edited.players[3] = Some(ids[4]);
+        edited.ended_ms = 601_000;
+        store.update_game(log[0].id, &edited).unwrap();
+        store.delete_game(log[1].id).unwrap();
+        let log = store.game_log().unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].record, edited);
     }
 
     #[test]

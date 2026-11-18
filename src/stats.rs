@@ -16,6 +16,7 @@ pub struct PlayerStats {
     pub skill: Option<Skill>,
     pub found_via: String,
     pub from: String,
+    pub auto_check_in: bool,
     /// Sessions they checked in to.
     pub sessions: u32,
     pub games: u32,
@@ -71,6 +72,7 @@ impl Stats {
                     skill: Some(p.skill),
                     found_via: p.found_via.clone(),
                     from: p.from.clone(),
+                    auto_check_in: p.auto_check_in,
                     ..Default::default()
                 };
                 (p.id, stats)
@@ -180,7 +182,7 @@ mod tests {
     use crate::store::{RawGame, RawPlayer};
 
     fn player(id: PlayerId, name: &str) -> RawPlayer {
-        RawPlayer { id, name: name.into(), skill: Skill::Intermediate, lifetime_games: 0, found_via: String::new(), from: String::new() }
+        RawPlayer { id, name: name.into(), skill: Skill::Intermediate, lifetime_games: 0, found_via: String::new(), from: String::new(), auto_check_in: false }
     }
 
     #[test]

@@ -25,14 +25,20 @@ fresh: everyone starts checked out, and you toggle players in as they arrive.
 If the app has been idle for 8 hours, it starts a new game day on its own.
 The **History** button (clock icon) shows past game days, attendance, and games.
 
-The tabs in the title bar switch between three views:
+The tabs in the title bar switch between four views:
 
 - **Dashboard**: the courts, Up next, the timer and the waiting list.
 - **Players**: the player database: everyone, archived players included, as a
   table, separate from any session. Edit names, skill levels, where they're from
   and how they found us in place; click the status to archive a player or make
-  them active again. Columns sort when clicked, and show sessions, games, games
-  per session, court time, usual partner, and first and latest session.
+  them active again. Turn on **Auto check-in** for regulars: they're checked in
+  at the start of every new session. Columns sort when clicked, and show
+  sessions, games, games per session, court time, usual partner, and first and
+  latest session. **Export CSV** saves the rows shown as a spreadsheet.
+- **Games**: every game ever played, one row each: date, start time, length,
+  round, court, and both teams. It's read-only until **Unlock editing** (after a
+  warning that it rewrites history); then every cell can be corrected and games
+  deleted. Edits to past sessions can't be undone. **Export CSV** here too.
 - **Analytics**: totals (players, sessions, games, average turnout, how many came
   back, court time), turnout per session split into returning players and
   first-timers, the ten players with the most games, and the roster's skill mix.
@@ -44,7 +50,8 @@ An older `state.json` is imported automatically on first run and renamed to
 
 1. Open the **roster** (people icon). On a new week, press **New game day** first if it didn't start on its own. Toggle players in as they arrive. New
    players go in the sidebar's **Add player** tab: name, skill level, where they're
-   from and how they found us (one tap for the usual answers).
+   from, how they found us (one tap for the usual answers), and whether to check
+   them in automatically at every new session.
 2. The **Up next** cards fill automatically from the waiting pool.
 3. Press **Next round** (or `N`): each Up next group goes onto its court, and the
    cards refill from the pool.

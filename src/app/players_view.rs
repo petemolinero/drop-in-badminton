@@ -19,6 +19,7 @@ pub(super) enum Col {
     Status,
     From,
     FoundVia,
+    AutoCheckIn,
     Sessions,
     Games,
     PerSession,
@@ -29,12 +30,13 @@ pub(super) enum Col {
 }
 
 impl Col {
-    const ALL: [Col; 12] = [
+    const ALL: [Col; 13] = [
         Col::Name,
         Col::Skill,
         Col::Status,
         Col::From,
         Col::FoundVia,
+        Col::AutoCheckIn,
         Col::Sessions,
         Col::Games,
         Col::PerSession,
@@ -51,6 +53,7 @@ impl Col {
             Col::Status => "Status",
             Col::From => "From",
             Col::FoundVia => "Found us via",
+            Col::AutoCheckIn => "Auto check-in",
             Col::Sessions => "Sessions",
             Col::Games => "Games",
             Col::PerSession => "Games / session",
@@ -69,6 +72,7 @@ impl Col {
             Col::Status => 124.0,
             Col::From => 150.0,
             Col::FoundVia => 150.0,
+            Col::AutoCheckIn => 124.0,
             Col::Sessions => 96.0,
             Col::Games => 80.0,
             Col::PerSession => 130.0,
@@ -187,6 +191,7 @@ impl DropInApp {
         });
         ui.add_space(10.0);
         let mut add = false;
+        let mut export = false;
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.players_view.search)
@@ -207,6 +212,9 @@ impl DropInApp {
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 add = widgets::button(ui, pal, ButtonKind::Primary, Some(icon::PERSON_ADD), "Add player", 34.0).clicked();
+                export = widgets::button(ui, pal, ButtonKind::Secondary, Some(icon::EXPORT), "Export CSV", 34.0)
+                    .on_hover_text("Save the players shown below as a spreadsheet")
+                    .clicked();
             });
         });
         ui.add_space(12.0);
@@ -259,9 +267,15 @@ impl DropInApp {
             list.iter().map(|r| r.id).collect()
         };
         self.players_view.order = order.clone();
+        let names: HashMap<PlayerId, String> = rows.iter().map(|r| (r.id, r.name.clone())).collect();
+        if export {
+            let lines: Vec<Vec<String>> = order.iter().map(|id| csv_row(shown[id], &names)).collect();
+            let ctx = ui.ctx().clone();
+            let file = format!("Players {}.csv", chrono::Local::now().format("%Y-%m-%d"));
+            self.export_csv(&ctx, &file, &CSV_HEADER, &lines);
+        }
 
         // The table: a card with a header row and a scrolling body.
-        let names: HashMap<PlayerId, String> = rows.iter().map(|r| (r.id, r.name.clone())).collect();
         pane(pal).inner_margin(Margin::same(0)).show(ui, |ui| {
             let avail = ui.available_size();
             ui.set_min_size(avail);
@@ -319,6 +333,7 @@ impl DropInApp {
                         lifetime_games: s.games,
                         found_via: s.found_via.clone(),
                         from: s.from.clone(),
+                        auto_check_in: s.auto_check_in,
                     },
                 };
                 rows.push(Row {
@@ -405,6 +420,7 @@ impl DropInApp {
                 Col::Status => self.status_cell(ui, pal, row, cell),
                 Col::From => self.text_cell(ui, pal, row, cell, Field::From),
                 Col::FoundVia => self.text_cell(ui, pal, row, cell, Field::FoundVia),
+                Col::AutoCheckIn => self.auto_cell(ui, pal, row, cell),
                 Col::Sessions => text(if s.sessions > 0 { s.sessions.to_string() } else { none() }, ink),
                 Col::Games => text(if s.games > 0 { s.games.to_string() } else { none() }, ink),
                 Col::PerSession => text(if s.sessions > 0 { format!("{:.1}", s.games_per_session()) } else { none() }, ink),
@@ -533,6 +549,27 @@ impl DropInApp {
         }
     }
 
+    /// Regulars: checked in automatically when a new session starts.
+    fn auto_cell(&mut self, ui: &mut Ui, pal: &Palette, row: &Row, cell: Rect) {
+        let mut on = row.player.auto_check_in;
+        let area = Rect::from_min_size(pos2(cell.left() + CELL_PAD, cell.center().y - 11.0), vec2(44.0, 22.0));
+        let resp = ui.put(area, |ui: &mut Ui| widgets::switch(ui, pal, &mut on));
+        let resp = resp.on_hover_text("Check them in at the start of every new session");
+        if !resp.changed() {
+            return;
+        }
+        if row.status == Status::Archived {
+            let edited = Player { auto_check_in: on, ..row.player.clone() };
+            if let Err(err) = self.store.update_archived_player(&edited) {
+                eprintln!("drop-in-badminton: couldn't change auto check-in: {err}");
+            }
+            self.save_gen += 1;
+        } else if let Some(p) = self.state.players.get_mut(&row.id) {
+            p.auto_check_in = on;
+            self.dirty = true;
+        }
+    }
+
     fn status_cell(&mut self, ui: &mut Ui, pal: &Palette, row: &Row, cell: Rect) {
         let (bg, fg, glyph) = match row.status {
             Status::Active => (pal.success_subtle, pal.success_fg, icon::CHECK_CIRCLE),
@@ -586,6 +623,50 @@ impl DropInApp {
     }
 }
 
+const CSV_HEADER: [&str; 15] = [
+    "Name",
+    "Skill level",
+    "Status",
+    "From",
+    "Found us via",
+    "Auto check-in",
+    "Sessions",
+    "Games",
+    "Games per session",
+    "Court time (minutes)",
+    "Usual partner",
+    "Games with partner",
+    "First session",
+    "Latest session",
+    "Player ID",
+];
+
+/// One player as a spreadsheet row (blank, not "—", where there's nothing).
+fn csv_row(r: &Row, names: &HashMap<PlayerId, String>) -> Vec<String> {
+    let s = &r.stats;
+    let count = |n: u32| if n > 0 { n.to_string() } else { String::new() };
+    let date = |t: Option<i64>| t.map_or_else(String::new, |t| fmt_date(t, "%Y-%m-%d"));
+    let partner = s.partner.and_then(|(q, n)| names.get(&q).map(|name| (name.clone(), n.to_string())));
+    let (partner, together) = partner.unwrap_or_default();
+    vec![
+        r.name.clone(),
+        r.skill.label().to_owned(),
+        r.status.label().to_owned(),
+        r.player.from.clone(),
+        r.player.found_via.clone(),
+        if r.player.auto_check_in { "Yes" } else { "No" }.to_owned(),
+        count(s.sessions),
+        count(s.games),
+        if s.sessions > 0 { format!("{:.1}", s.games_per_session()) } else { String::new() },
+        if s.court_ms > 0 { (s.court_ms / 60_000).to_string() } else { String::new() },
+        partner,
+        together,
+        date(s.first_ms),
+        date(s.last_ms),
+        r.id.to_string(),
+    ]
+}
+
 fn compare(col: Col, a: &Row, b: &Row) -> std::cmp::Ordering {
     let (x, y) = (&a.stats, &b.stats);
     match col {
@@ -594,6 +675,7 @@ fn compare(col: Col, a: &Row, b: &Row) -> std::cmp::Ordering {
         Col::Status => (a.status as u8).cmp(&(b.status as u8)),
         Col::From => a.player.from.to_lowercase().cmp(&b.player.from.to_lowercase()),
         Col::FoundVia => a.player.found_via.to_lowercase().cmp(&b.player.found_via.to_lowercase()),
+        Col::AutoCheckIn => a.player.auto_check_in.cmp(&b.player.auto_check_in),
         Col::Sessions => x.sessions.cmp(&y.sessions),
         Col::Games => x.games.cmp(&y.games),
         Col::PerSession => x.games_per_session().total_cmp(&y.games_per_session()),
