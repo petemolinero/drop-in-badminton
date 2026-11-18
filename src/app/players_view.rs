@@ -20,6 +20,7 @@ pub(super) enum Col {
     From,
     FoundVia,
     AutoCheckIn,
+    PlaysWith,
     Sessions,
     Games,
     PerSession,
@@ -30,13 +31,14 @@ pub(super) enum Col {
 }
 
 impl Col {
-    const ALL: [Col; 13] = [
+    const ALL: [Col; 14] = [
         Col::Name,
         Col::Skill,
         Col::Status,
         Col::From,
         Col::FoundVia,
         Col::AutoCheckIn,
+        Col::PlaysWith,
         Col::Sessions,
         Col::Games,
         Col::PerSession,
@@ -54,6 +56,7 @@ impl Col {
             Col::From => "From",
             Col::FoundVia => "Found us via",
             Col::AutoCheckIn => "Auto check-in",
+            Col::PlaysWith => "Plays with",
             Col::Sessions => "Sessions",
             Col::Games => "Games",
             Col::PerSession => "Games / session",
@@ -73,6 +76,7 @@ impl Col {
             Col::From => 150.0,
             Col::FoundVia => 150.0,
             Col::AutoCheckIn => 124.0,
+            Col::PlaysWith => 170.0,
             Col::Sessions => 96.0,
             Col::Games => 80.0,
             Col::PerSession => 130.0,
@@ -171,6 +175,8 @@ struct Row {
     stats: PlayerStats,
     /// The player as stored (for the editable columns).
     player: Player,
+    /// Who they're linked to play with ("" for nobody).
+    plays_with: String,
 }
 
 impl DropInApp {
@@ -320,6 +326,7 @@ impl DropInApp {
                 status: Status::Active,
                 stats: stats.players.get(&p.id).cloned().unwrap_or_default(),
                 player: p.clone(),
+                plays_with: super::groups::and_list(&self.partner_names(p.id)),
             })
             .collect();
         for (id, s) in &stats.players {
@@ -335,6 +342,7 @@ impl DropInApp {
                         found_via: s.found_via.clone(),
                         from: s.from.clone(),
                         auto_check_in: s.auto_check_in,
+                        link: None,
                     },
                 };
                 rows.push(Row {
@@ -344,6 +352,7 @@ impl DropInApp {
                     status: Status::Archived,
                     stats: s.clone(),
                     player,
+                    plays_with: String::new(),
                 });
             }
         }
@@ -422,6 +431,7 @@ impl DropInApp {
                 Col::From => self.text_cell(ui, pal, row, cell, Field::From),
                 Col::FoundVia => self.text_cell(ui, pal, row, cell, Field::FoundVia),
                 Col::AutoCheckIn => self.auto_cell(ui, pal, row, cell),
+                Col::PlaysWith => self.plays_with_cell(ui, pal, row, cell),
                 Col::Sessions => text(if s.sessions > 0 { s.sessions.to_string() } else { none() }, ink),
                 Col::Games => text(if s.games > 0 { s.games.to_string() } else { none() }, ink),
                 Col::PerSession => text(if s.sessions > 0 { format!("{:.1}", s.games_per_session()) } else { none() }, ink),
@@ -550,6 +560,29 @@ impl DropInApp {
         }
     }
 
+    /// Who they always play with; click to change (players on the roster).
+    fn plays_with_cell(&mut self, ui: &mut Ui, pal: &Palette, row: &Row, cell: Rect) {
+        let text = if row.plays_with.is_empty() { "—".to_owned() } else { row.plays_with.clone() };
+        let area = Rect::from_center_size(cell.center(), vec2(cell.width() - 12.0, 30.0));
+        let active = row.status == Status::Active;
+        let resp = ui.interact(area, unique(("pv-link", row.id)), if active { Sense::click() } else { Sense::hover() });
+        let p = ui.painter().with_clip_rect(cell.shrink2(vec2(4.0, 0.0)));
+        if active && resp.hovered() {
+            p.rect_stroke(area, CornerRadius::same(4), Stroke::new(1.0, pal.stroke1), StrokeKind::Inside);
+        }
+        let mut x = cell.left() + CELL_PAD;
+        if !row.plays_with.is_empty() {
+            let r = p.text(pos2(x, cell.center().y + 1.0), Align2::LEFT_CENTER, icon::LINK, icon_font(15.0), pal.brand_fg);
+            x = r.right() + 6.0;
+        }
+        let ink = if row.plays_with.is_empty() { pal.fg3 } else { pal.fg1 };
+        let galley = widgets::elided(&p, &text, regular(15.0), ink, cell.right() - CELL_PAD - x);
+        p.galley(pos2(x, cell.center().y - galley.size().y / 2.0), galley, ink);
+        if active && resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Who they always play with").clicked() {
+            self.open_link_dialog(row.id);
+        }
+    }
+
     /// Regulars: checked in automatically when a new session starts.
     fn auto_cell(&mut self, ui: &mut Ui, pal: &Palette, row: &Row, cell: Rect) {
         let mut on = row.player.auto_check_in;
@@ -624,13 +657,14 @@ impl DropInApp {
     }
 }
 
-const CSV_HEADER: [&str; 15] = [
+const CSV_HEADER: [&str; 16] = [
     "Name",
     "Skill level",
     "Status",
     "From",
     "Found us via",
     "Auto check-in",
+    "Plays with",
     "Sessions",
     "Games",
     "Games per session",
@@ -656,6 +690,7 @@ fn csv_row(r: &Row, names: &HashMap<PlayerId, String>) -> Vec<String> {
         r.player.from.clone(),
         r.player.found_via.clone(),
         if r.player.auto_check_in { "Yes" } else { "No" }.to_owned(),
+        r.plays_with.clone(),
         count(s.sessions),
         count(s.games),
         if s.sessions > 0 { format!("{:.1}", s.games_per_session()) } else { String::new() },
@@ -677,6 +712,7 @@ fn compare(col: Col, a: &Row, b: &Row) -> std::cmp::Ordering {
         Col::From => a.player.from.to_lowercase().cmp(&b.player.from.to_lowercase()),
         Col::FoundVia => a.player.found_via.to_lowercase().cmp(&b.player.found_via.to_lowercase()),
         Col::AutoCheckIn => a.player.auto_check_in.cmp(&b.player.auto_check_in),
+        Col::PlaysWith => a.plays_with.to_lowercase().cmp(&b.plays_with.to_lowercase()),
         Col::Sessions => x.sessions.cmp(&y.sessions),
         Col::Games => x.games.cmp(&y.games),
         Col::PerSession => x.games_per_session().total_cmp(&y.games_per_session()),

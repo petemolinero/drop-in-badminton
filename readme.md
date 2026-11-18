@@ -46,6 +46,22 @@ The tabs in the title bar switch between four views:
 An older `state.json` is imported automatically on first run and renamed to
 `state.json.imported`.
 
+## Playing in groups
+
+- **Plays together** (right-click a player → *Plays together with…*, or the
+  Players view's *Plays with* column): link 2–4 players, like a parent and
+  their kids. Whenever they're here and free at the same time they go on the
+  same court (teams are still balanced by skill), sharing one place in line. The link lasts across sessions
+  until you unlink them; anyone not here or on a break doesn't hold the others up.
+  Linked players show a link icon in the lists.
+- **Practice group** (the *Practice* button, or right-click → *Join the
+  practice group*): for a night when some players are preparing for a
+  tournament. They only play each other, but the courts are shared fairly: each
+  Up next group goes to whichever side has played less tonight (games per hour,
+  per person), so everyone gets about the same time on court. Their places in
+  the waiting list, and their courts and Up next cards, are marked in orange.
+  It lasts for the session.
+
 ## How a night works
 
 1. Open the **roster** (people icon). On a new week, press **New game day** first if it didn't start on its own. Toggle players in as they arrive. New
@@ -67,10 +83,14 @@ until the next round, so they don't get placed straight back.
 
 - The waiting pool is ordered by wall-clock time since each player last came off
   a court (or checked in). Waits within the same minute are broken by fewest games tonight.
-- Each Up next group starts with the longest-waiting player and is completed with the
-  closest skill matches (Beginner = yellow, Intermediate = red, Advanced = green, Expert = blue).
-- Anyone past the **maximum wait** (default 30 min) goes in next regardless of skill.
-- Teams are balanced: strongest + weakest vs. the middle two.
+- Up next always takes the **next players in line**: 4 for one open court, 8 for
+  two, and so on. Skill never lets anyone jump the queue; it only arranges the
+  chosen players: similar levels share a court (Beginner = yellow, Intermediate =
+  red, Advanced = green, Expert = blue), and teams are balanced: strongest +
+  weakest vs. the middle two.
+- Linked players share a place in line and a wait (bracketed together in the
+  waiting list). If the cut-off would split them, they wait for the next round
+  and the next player in line goes instead.
 - With too few players to fill every court, courts take turns: the one that has
   been playing longest gets the next group.
 

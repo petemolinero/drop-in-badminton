@@ -28,6 +28,7 @@ use crate::widgets::{self, ButtonKind, Help, clock, short_duration, unique};
 
 mod analytics_view;
 mod games_view;
+mod groups;
 mod players_view;
 
 /// The dashboard sidebar's tabs.
@@ -67,6 +68,8 @@ enum PlayerAction {
     Rename,
     Wait,
     Delete,
+    Link,
+    Practice,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -181,6 +184,10 @@ pub struct DropInApp {
     rename_dialog: Option<(PlayerId, String, bool)>,
     /// The adjust-wait dialog: player, minutes typed, and whether it still needs focus.
     wait_dialog: Option<(PlayerId, String, bool)>,
+    link_dialog: Option<groups::LinkDialog>,
+    /// The waiting list's order this frame (to bracket linked players).
+    waiting_order: Vec<PlayerId>,
+    practice_dialog: Option<groups::PracticeDialog>,
     drag: Option<PlayerId>,
     drop_targets: Vec<(Rect, Target)>,
     anims: HashMap<PlayerId, ChipAnim>,
@@ -250,6 +257,9 @@ impl DropInApp {
             pending: None,
             rename_dialog: None,
             wait_dialog: None,
+            link_dialog: None,
+            waiting_order: Vec::new(),
+            practice_dialog: None,
             drag: None,
             drop_targets: Vec::new(),
             anims: HashMap::new(),
@@ -479,9 +489,10 @@ impl DropInApp {
     /// so they show zero. (Their real wait is kept underneath, so taking them
     /// off before the game is done picks it back up.)
     fn shown_wait_ms(&self, id: PlayerId, now: i64) -> Option<i64> {
-        let p = self.state.session.present.get(&id)?;
+        self.state.session.present.get(&id)?;
         let on_court = matches!(self.state.session.locate(id), Some(Spot::Court(..)));
-        Some(if on_court { 0 } else { p.waiting_ms(now) })
+        // Linked players waiting together share the longer wait.
+        Some(if on_court { 0 } else { self.state.shared_wait_ms(id, now) })
     }
 
     /// Record where a player is shown without a chip (e.g. a pool row), so a
@@ -590,6 +601,8 @@ impl eframe::App for DropInApp {
         self.history_dialog(&ctx, &pal);
         self.rename_dialog_ui(&ctx, &pal);
         self.wait_dialog_ui(&ctx, &pal);
+        self.link_dialog_ui(&ctx, &pal);
+        self.practice_dialog_ui(&ctx, &pal);
         self.help_dialog(&ctx, &pal);
         if let Some((id, action)) = self.pending.take() {
             self.apply_player_action(&ctx, id, action);
@@ -691,6 +704,23 @@ impl DropInApp {
             }
             if show.contains("analytics") {
                 self.view = View::Analytics;
+            }
+            if show.contains("groupsdemo") {
+                // Link two players and put every fourth one here in a practice group.
+                let ids: Vec<PlayerId> = self.state.session.present.keys().copied().collect();
+                if ids.len() > 8 {
+                    let now = self.state.now();
+                    self.state.link_players(ids[0], &[ids[1]], now);
+                    self.state.set_practice(ids.iter().copied().skip(2).step_by(3).collect(), now);
+                }
+            }
+            if show.contains("linkdialog") {
+                if let Some(&id) = self.state.session.present.keys().next() {
+                    self.open_link_dialog(id);
+                }
+            }
+            if show.contains("practicedialog") {
+                self.open_practice_dialog();
             }
             if show.contains("games") {
                 self.view = View::Games;
@@ -884,8 +914,25 @@ impl DropInApp {
         let start = self.state.session.clock.start_ms;
         // The session's date, when there's room before the clock on the right.
         let label = p.layout_no_wrap(format!("Session · {}", fmt_date(start, "%A, %B %-d · %-I:%M %p")), regular(14.0), pal.fg2);
-        if x + 20.0 + label.size().x < rect.right() - 340.0 {
-            p.galley(pos2(x + 20.0, y - label.size().y / 2.0 - 1.0), label, pal.fg2);
+        // Then the button for the next session (it's also in the pencil menu,
+        // for when the window is too narrow for it here).
+        const NEW_W: f32 = 150.0;
+        let room = rect.right() - 340.0;
+        let mut bx = x + 20.0;
+        if bx + label.size().x + 12.0 + NEW_W < room {
+            let w = label.size().x;
+            p.galley(pos2(bx, y - label.size().y / 2.0 - 1.0), label, pal.fg2);
+            bx += w + 12.0;
+        }
+        if bx + NEW_W < room {
+            let area = Rect::from_min_max(pos2(bx, y - 15.0), pos2(bx + NEW_W + 40.0, y + 15.0));
+            let mut bui = ui.new_child(UiBuilder::new().max_rect(area).layout(Layout::left_to_right(Align::Center)));
+            if widgets::button(&mut bui, pal, ButtonKind::Secondary, Some(icon::CALENDAR), "New session…", 30.0)
+                .on_hover_text("Put this session into History and start a new one")
+                .clicked()
+            {
+                self.session_form = Some(SessionForm::at(wall_ms(), true, false));
+            }
         }
         let _ = now;
 
@@ -1078,6 +1125,17 @@ impl DropInApp {
             }
             if widgets::ribbon_button(ui, pal, icon::SETTINGS, "Settings", self.settings_open).clicked() {
                 self.settings_open = true;
+            }
+            let practising = self.state.session.practice.iter().filter(|id| self.state.session.is_here(**id)).count();
+            let tip = match practising {
+                0 => "Set up a practice group: players who only play each other tonight".to_owned(),
+                n => format!("Tonight's practice group: {n} players"),
+            };
+            if widgets::ribbon_button(ui, pal, if practising > 0 { icon::TROPHY_F } else { icon::TROPHY }, "Practice", practising > 0)
+                .on_hover_text(tip)
+                .clicked()
+            {
+                self.open_practice_dialog();
             }
             widgets::vdivider(ui, pal, 44.0);
             self.update_button(ui, pal);
@@ -1517,7 +1575,11 @@ impl DropInApp {
 
         // The court's sign hangs on the back wall, beside the floodlights.
         let hy = rect.top() + view.top / 2.0 + 1.0;
-        widgets::court_sign(&p, pal, pos2(rect.left() + 8.0, hy), i + 1, (view.top * 0.5).round());
+        let sign = widgets::court_sign(&p, pal, pos2(rect.left() + 8.0, hy), i + 1, (view.top * 0.5).round());
+        if self.state.is_practice_group(&self.state.session.courts[i]) {
+            let c = groups::practice_color(pal);
+            widgets::paint_badge(&p, pos2(sign.right() + 8.0, hy), Align2::LEFT_CENTER, Some(icon::TROPHY_F), "Practice", CHIP_TEXT, c, Color32::WHITE);
+        }
 
         // Team A stands on the far half and team B on the near half, either
         // side of the net; every card is full size whatever its distance.
@@ -1590,8 +1652,14 @@ impl DropInApp {
             4 => None,
             k => Some((format!("{k} of 4"), Some(icon::PERSON), pal.warning_subtle, pal.warning_fg)),
         };
+        let mut badge_x = title.right() + 10.0;
+        if self.state.is_practice_group(&group) {
+            let c = groups::practice_color(pal);
+            let r = widgets::paint_badge(&p, pos2(badge_x, hy), Align2::LEFT_CENTER, Some(icon::TROPHY_F), "Practice", CHIP_TEXT, c.gamma_multiply(0.16), c);
+            badge_x = r.right() + 6.0;
+        }
         if let Some((status, glyph, bg, fg)) = pill {
-            widgets::paint_badge(&p, pos2(title.right() + 10.0, hy), Align2::LEFT_CENTER, glyph, &status, CHIP_TEXT, bg, fg);
+            widgets::paint_badge(&p, pos2(badge_x, hy), Align2::LEFT_CENTER, glyph, &status, CHIP_TEXT, bg, fg);
         }
         let pointing = ui.ctx().pointer_hover_pos().is_some_and(|p| rect.contains(p));
         if filled > 0 && self.state.session.round_number > 0 && pointing {
@@ -1773,6 +1841,7 @@ impl DropInApp {
             return;
         }
 
+        self.waiting_order = active.clone();
         // A departure board: one row style for everyone, big enough to read
         // from the bench, longest wait at the top. One scrollable list.
         let all: Vec<(PlayerId, Option<usize>)> = active
@@ -1878,12 +1947,31 @@ impl DropInApp {
         let skipping = self.state.session.skip_round.contains(&id);
         let dimmed = presence.resting || self.drag == Some(id);
         let hover = ctx.animate_bool_responsive(resp.id.with("h"), resp.hovered());
-        // Before the night's first round nobody can be "overdue" yet.
-        let overdue = self.state.session.round_number > 0 && !presence.resting && presence.waiting_ms(now) >= self.state.settings.max_wait_ms();
 
         let p = ui.painter();
-        let fill = theme::lerp_color(Color32::TRANSPARENT, pal.subtle_hover, hover);
-        p.rect_filled(rect, CornerRadius::same(4), fill);
+        // Linked players waiting together sit in one bracket: a shared tint
+        // and a bar down the left, joined across their rows.
+        let unit = self.state.waiting_unit(id);
+        let bracket = (unit.len() > 1 && rank.is_some()).then(|| {
+            let line = &self.waiting_order;
+            let pos = |q: &PlayerId| line.iter().position(|x| x == q);
+            let mine = pos(&id);
+            (unit.iter().filter_map(pos).min() == mine, unit.iter().filter_map(pos).max() == mine)
+        });
+        match bracket {
+            Some((first, last)) => {
+                // Hovering deepens the bracket's tint rather than covering it.
+                let (top, bottom) = (if first { 6 } else { 0 }, if last { 6 } else { 0 });
+                let tint = theme::lerp_color(pal.brand_subtle.gamma_multiply(0.75), pal.brand_subtle, hover);
+                p.rect_filled(rect, CornerRadius { nw: top, ne: top, sw: bottom, se: bottom }, tint);
+                let bar = Rect::from_min_max(rect.left_top() + vec2(0.0, if first { 4.0 } else { 0.0 }), pos2(rect.left() + 3.0, rect.bottom() - if last { 4.0 } else { 0.0 }));
+                p.rect_filled(bar, CornerRadius::same(1), pal.brand_fg);
+            }
+            None => {
+                let fill = theme::lerp_color(Color32::TRANSPARENT, pal.subtle_hover, hover);
+                p.rect_filled(rect, CornerRadius::same(4), fill);
+            }
+        }
         let alpha = if dimmed { 0.45 } else { 1.0 };
         let cy = rect.center().y;
         let mut x = rect.left() + 4.0;
@@ -1892,7 +1980,8 @@ impl DropInApp {
         let block = Rect::from_center_size(pos2(x + 16.0, cy), vec2(34.0, (row_h - 8.0).min(36.0)));
         match rank {
             Some(rank) => {
-                let (bg, fg) = (pal.subtle_selected, pal.fg1);
+                // The practice group's places are in its colour.
+                let (bg, fg) = if self.state.in_practice(id) { (groups::practice_color(pal), Color32::WHITE) } else { (pal.subtle_selected, pal.fg1) };
                 p.rect_filled(block, CornerRadius::same(6), bg.gamma_multiply(alpha));
                 p.text(block.center(), Align2::CENTER_CENTER, rank.to_string(), theme::bold((18.0 * k).max(14.0).round()), fg);
             }
@@ -1912,12 +2001,12 @@ impl DropInApp {
         if skipping && !presence.resting {
             detail.push_str(" · sitting out");
         }
-        let right = rect.right() - 6.0 - if overdue { 22.0 } else { 0.0 };
+        let right = rect.right() - 6.0;
         if compact {
             // One line: name on the left; on the right the wait (big) over the
             // games (small). The hover actions take that spot, so it fades for them.
             let fade = alpha * (1.0 - if presence.resting { 1.0 } else { hover });
-            let detail_color = if overdue { pal.warning_fg } else { pal.fg2 };
+            let detail_color = pal.fg2;
             let wait = self.shown_wait_ms(id, now).map(short_duration).unwrap_or_default();
             let games = self.state.session.present.get(&id).map_or(0, |p| p.games_tonight);
             let games = if games == 1 { "1 game".to_owned() } else { format!("{games} games") };
@@ -1931,9 +2020,12 @@ impl DropInApp {
                 let tg = p.layout_no_wrap(top, semibold(18.0), detail_color.gamma_multiply(fade));
                 let bg = p.layout_no_wrap(bottom, regular(13.0), pal.fg2.gamma_multiply(fade));
                 let col = tg.size().x.max(bg.size().x);
-                let name_g = widgets::elided(p, &name, semibold(name_size), pal.fg1.gamma_multiply(alpha), right - x - col - 12.0);
+                let marks = self.group_marks_width(id, 16.0);
+                let name_g = widgets::elided(p, &name, semibold(name_size), pal.fg1.gamma_multiply(alpha), right - x - col - 12.0 - marks);
                 let p = ui.painter();
+                let name_right = x + name_g.size().x;
                 p.galley(pos2(x, cy - name_g.size().y / 2.0), name_g, pal.fg1);
+                self.paint_group_marks(p, pal, pos2(name_right + 6.0, cy), id, 16.0, alpha);
                 p.galley(pos2(right - tg.size().x, cy - tg.size().y + 3.0), tg, detail_color);
                 p.galley(pos2(right - bg.size().x, cy + 1.0), bg, pal.fg3);
             } else {
@@ -1942,21 +2034,20 @@ impl DropInApp {
                 job.append(&top, 0.0, egui::TextFormat { font_id: semibold(16.0), color: detail_color.gamma_multiply(fade), valign: Align::Center, ..Default::default() });
                 job.append(&format!(" · {bottom}"), 0.0, egui::TextFormat { font_id: regular(13.0), color: pal.fg2.gamma_multiply(fade), valign: Align::Center, ..Default::default() });
                 let dg = p.layout_job(job);
-                let name_g = widgets::elided(p, &name, semibold(name_size), pal.fg1.gamma_multiply(alpha), right - x - dg.size().x - 12.0);
+                let marks = self.group_marks_width(id, 15.0);
+                let name_g = widgets::elided(p, &name, semibold(name_size), pal.fg1.gamma_multiply(alpha), right - x - dg.size().x - 12.0 - marks);
                 let p = ui.painter();
+                let name_right = x + name_g.size().x;
                 p.galley(pos2(x, cy - name_g.size().y / 2.0), name_g, pal.fg1);
+                self.paint_group_marks(p, pal, pos2(name_right + 6.0, cy), id, 15.0, alpha);
                 p.galley(pos2(right - dg.size().x, cy - dg.size().y / 2.0), dg, detail_color);
             }
         } else {
-            let detail_color = if overdue { pal.warning_fg } else { pal.fg3 };
+            let detail_color = pal.fg3;
             let p = ui.painter();
             let g = widgets::elided(p, &name, semibold(18.0), pal.fg1.gamma_multiply(alpha), right - x);
             p.galley(pos2(x, cy - 9.0 - g.size().y / 2.0), g, pal.fg1);
             p.text(pos2(x, cy + 13.0), Align2::LEFT_CENTER, detail, regular(13.0), detail_color.gamma_multiply(alpha));
-        }
-        // Overdue players get an hourglass.
-        if overdue {
-            ui.painter().text(pos2(rect.right() - 6.0, cy), Align2::RIGHT_CENTER, icon::HOURGLASS_F, icon_font(17.0), pal.warning_fg.gamma_multiply(1.0 - hover));
         }
 
         // Hover actions.
@@ -2141,9 +2232,8 @@ impl DropInApp {
                 ui.label(cap("Waited · games"));
             });
         });
-        let footer_h = 52.0;
-        // Whole rows only, so the list never ends on half a name.
-        let list_h = ((ui.available_height() - footer_h) / 44.0).floor() * 44.0;
+        // The full height; the fade at the bottom shows there's more.
+        let list_h = ui.available_height();
         let query = self.search.trim().to_lowercase();
         let mut players: Vec<Player> = self
             .state
@@ -2177,19 +2267,6 @@ impl DropInApp {
                 }
             });
         widgets::fade_bottom(ui, &out, pal.bg1, 0);
-
-        // --- Footer ---
-        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-            ui.horizontal(|ui| {
-                if widgets::button(ui, pal, ButtonKind::Secondary, Some(icon::CALENDAR), "New session…", 36.0)
-                    .on_hover_text("Put this session into History and start a new one")
-                    .clicked()
-                {
-                    self.session_form = Some(SessionForm::at(wall_ms(), true, false));
-                }
-            });
-            widgets::hdivider(ui, pal);
-        });
     }
 
     fn roster_row(&mut self, ui: &mut Ui, pal: &Palette, player: &Player, now: i64) {
@@ -2275,7 +2352,8 @@ impl DropInApp {
                 }
             }
         } else {
-            let name_w = ui.available_width() - 96.0;
+            let marks = self.group_marks_width(id, 15.0);
+            let name_w = ui.available_width() - 96.0 - marks;
             let color = if here { pal.fg1 } else { pal.fg3 };
             // Same size for every name; a long one ends in "…".
             let name = ui
@@ -2293,6 +2371,10 @@ impl DropInApp {
             self.player_menu(&name, pal, id);
             if name.double_clicked() {
                 self.renaming = Some((id, player.name.clone(), true));
+            }
+            if marks > 0.0 {
+                let (r, _) = ui.allocate_exact_size(vec2(marks, 20.0), Sense::hover());
+                self.paint_group_marks(ui.painter(), pal, pos2(r.left() - 4.0, r.center().y), id, 15.0, if here { 1.0 } else { 0.6 });
             }
         }
 
@@ -2411,15 +2493,6 @@ impl DropInApp {
                 });
 
                 widgets::hdivider(ui, pal);
-                widgets::section_label(ui, pal, "Matchmaking");
-                row(ui, "Match by skill", "Group players of similar level together", &mut |ui| {
-                    widgets::switch_labeled(ui, pal, &mut s.skill_matching);
-                });
-                row(ui, "Maximum wait", "After this long, a player goes up next even without a skill match", &mut |ui| {
-                    widgets::stepper(ui, pal, &mut s.max_wait_minutes, 5, 180, 5, "min");
-                });
-
-                widgets::hdivider(ui, pal);
                 widgets::section_label(ui, pal, "Display");
                 row(ui, "Dark theme", "Easier on the eyes on a big TV", &mut |ui| {
                     widgets::switch_labeled(ui, pal, &mut s.dark_mode);
@@ -2447,10 +2520,7 @@ impl DropInApp {
             if self.state.settings.courts != before.courts {
                 self.state.sync_court_count(now);
             }
-            if self.state.settings.round_minutes != before.round_minutes
-                || self.state.settings.max_wait_minutes != before.max_wait_minutes
-                || self.state.settings.skill_matching != before.skill_matching
-            {
+            if self.state.settings.round_minutes != before.round_minutes {
                 self.state.fill_deck(now);
             }
             self.dirty = true;
@@ -3065,18 +3135,12 @@ impl DropInApp {
     }
 
     fn help_deck(&self) -> Help {
-        let s = &self.state.settings;
-        let pick = if s.skill_matching {
-            "Picked automatically: the longest wait first, then the closest skill levels.".to_owned()
-        } else {
-            "Picked automatically: the four longest waits (skill matching is off in Settings).".to_owned()
-        };
         Help {
             title: "Up next — the following game on each court".into(),
             bullets: vec![
-                pick,
-                format!("Anyone waiting {} min or more gets the next spot whatever their level.", s.max_wait_minutes),
-                "Teams are balanced: the strongest and weakest player against the middle two.".into(),
+                "Always the next players in line: 4 for one court, 8 for two, and so on.".into(),
+                "Skill only arranges them: similar levels share a court, and teams are balanced.".into(),
+                "Linked players go on together; if the cut-off would split them, they wait a round.".into(),
                 "Drag to rearrange. Play now sends a group on straight away.".into(),
             ],
         }
@@ -3088,7 +3152,7 @@ impl DropInApp {
             bullets: vec![
                 "Longest since their last game at the top — or since check-in if they haven't played.".into(),
                 "Ties go to whoever has played fewer games tonight.".into(),
-                format!("An hourglass marks anyone waiting {}+ min: they're picked next regardless of skill.", self.state.settings.max_wait_minutes),
+                "Linked players share a place in line and a wait, bracketed together.".into(),
                 "Point at a name for its buttons: take a break, or check out.".into(),
             ],
         }
@@ -3163,6 +3227,17 @@ impl DropInApp {
                 chosen = Some(PlayerAction::CheckOut);
             }
             ui.separator();
+            let partners = self.partner_names(id);
+            let link_label = if partners.is_empty() { "Plays together with…".to_owned() } else { format!("Plays with {}…", groups::and_list(&partners)) };
+            if item(ui, icon::LINK, &link_label, true, pal.fg1) {
+                chosen = Some(PlayerAction::Link);
+            }
+            let practising = self.state.in_practice(id);
+            let practice_label = if practising { "Leave the practice group" } else { "Join the practice group" };
+            if item(ui, icon::TROPHY, practice_label, here || practising, pal.fg1) {
+                chosen = Some(PlayerAction::Practice);
+            }
+            ui.separator();
             let mut skill_job = egui::text::LayoutJob::default();
             skill_job.append(icon::PERSON_STAR, 0.0, egui::TextFormat { font_id: icon_font(18.0), color: pal.fg2, valign: Align::Center, ..Default::default() });
             skill_job.append(&format!("Skill level: {}", skill.label()), 12.0, egui::TextFormat { font_id: regular(15.0), color: pal.fg1, valign: Align::Center, ..Default::default() });
@@ -3228,6 +3303,8 @@ impl DropInApp {
                 self.wait_dialog = Some((id, mins.to_string(), true));
             }
             PlayerAction::Delete => self.confirm = Some(Confirm::Delete(id)),
+            PlayerAction::Link => self.open_link_dialog(id),
+            PlayerAction::Practice => self.toggle_practice(ctx, id),
         }
     }
 

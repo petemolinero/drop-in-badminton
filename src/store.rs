@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS players (
     archived       INTEGER NOT NULL DEFAULT 0,
     found_via      TEXT    NOT NULL DEFAULT '',
     home           TEXT    NOT NULL DEFAULT '',
-    auto_check_in  INTEGER NOT NULL DEFAULT 0
+    auto_check_in  INTEGER NOT NULL DEFAULT 0,
+    link_group     INTEGER
 );
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -211,6 +212,7 @@ impl Store {
             ("found_via", "ALTER TABLE players ADD COLUMN found_via TEXT NOT NULL DEFAULT ''"),
             ("home", "ALTER TABLE players ADD COLUMN home TEXT NOT NULL DEFAULT ''"),
             ("auto_check_in", "ALTER TABLE players ADD COLUMN auto_check_in INTEGER NOT NULL DEFAULT 0"),
+            ("link_group", "ALTER TABLE players ADD COLUMN link_group INTEGER"),
         ] {
             if !columns.iter().any(|c| c == column) {
                 conn.execute_batch(ddl)?;
@@ -288,7 +290,7 @@ impl Store {
             }
         }
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, skill, lifetime_games, found_via, home, auto_check_in FROM players WHERE archived = 0",
+            "SELECT id, name, skill, lifetime_games, found_via, home, auto_check_in, link_group FROM players WHERE archived = 0",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(Player {
@@ -299,6 +301,7 @@ impl Store {
                 found_via: r.get(4)?,
                 from: r.get(5)?,
                 auto_check_in: r.get(6)?,
+                link: r.get::<_, Option<i64>>(7)?.map(|l| l as u64),
             })
         })?;
         for p in rows {
@@ -335,15 +338,16 @@ impl Store {
 
     fn save_players(tx: &Transaction, players: &BTreeMap<PlayerId, Player>) -> rusqlite::Result<()> {
         let mut upsert = tx.prepare_cached(
-            "INSERT INTO players(id, name, skill, lifetime_games, archived, found_via, home, auto_check_in)
-             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7)
+            "INSERT INTO players(id, name, skill, lifetime_games, archived, found_via, home, auto_check_in, link_group)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET name = excluded.name, skill = excluded.skill,
                  lifetime_games = excluded.lifetime_games, archived = 0,
-                 found_via = excluded.found_via, home = excluded.home, auto_check_in = excluded.auto_check_in",
+                 found_via = excluded.found_via, home = excluded.home, auto_check_in = excluded.auto_check_in,
+                 link_group = excluded.link_group",
         )?;
         // A player added from the Players view is only kept once they have a name.
         for p in players.values().filter(|p| !p.name.trim().is_empty()) {
-            upsert.execute(params![p.id as i64, p.name, skill_to_str(p.skill), p.lifetime_games, p.found_via.trim(), p.from.trim(), p.auto_check_in])?;
+            upsert.execute(params![p.id as i64, p.name, skill_to_str(p.skill), p.lifetime_games, p.found_via.trim(), p.from.trim(), p.auto_check_in, p.link.map(|l| l as i64)])?;
         }
         // Anyone no longer on the roster is archived, keeping their history.
         let ids: Vec<i64> = {
@@ -672,9 +676,11 @@ mod tests {
         ann.from = "Leith ".into();
         ann.found_via = "A friend".into();
         ann.auto_check_in = true;
+        ann.link = Some(1);
         store.save(&mut s).unwrap();
         let ann = &store.load().unwrap().players[&1];
         assert_eq!((ann.from.as_str(), ann.found_via.as_str(), ann.auto_check_in), ("Leith", "A friend", true));
+        assert_eq!(ann.link, Some(1));
     }
 
     #[test]

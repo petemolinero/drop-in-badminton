@@ -142,6 +142,7 @@ impl Default for GamesView {
 
 impl DropInApp {
     pub(super) fn games_view(&mut self, ui: &mut Ui, pal: &Palette) {
+        #[cfg_attr(not(debug_assertions), allow(unused_mut))]
         let mut rows = self.game_rows();
         // Debug builds: `DROP_IN_BADMINTON_SHOW=gamesedit` stages an edit and a deletion.
         #[cfg(debug_assertions)]

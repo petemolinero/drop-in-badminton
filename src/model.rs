@@ -84,6 +84,10 @@ pub struct Player {
     /// Checked in automatically whenever a new session starts (regulars).
     #[serde(default)]
     pub auto_check_in: bool,
+    /// Players who always play together (a parent and kids, a couple) share
+    /// a link: whenever they're free at the same time they go on one court.
+    #[serde(default)]
+    pub link: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -91,9 +95,6 @@ pub struct Player {
 pub struct Settings {
     pub courts: usize,
     pub round_minutes: u32,
-    /// After waiting this long a player is placed on deck regardless of skill match.
-    pub max_wait_minutes: u32,
-    pub skill_matching: bool,
     pub auto_start_timer: bool,
     pub dark_mode: bool,
     pub ui_scale: f32,
@@ -104,8 +105,6 @@ impl Default for Settings {
         Self {
             courts: 3,
             round_minutes: 15,
-            max_wait_minutes: 30,
-            skill_matching: true,
             auto_start_timer: false,
             dark_mode: false,
             ui_scale: 1.0,
@@ -118,10 +117,6 @@ impl Settings {
 
     pub fn round_ms(&self) -> i64 {
         self.round_minutes.max(1) as i64 * 60_000
-    }
-
-    pub fn max_wait_ms(&self) -> i64 {
-        self.max_wait_minutes.max(1) as i64 * 60_000
     }
 }
 
@@ -245,6 +240,9 @@ pub struct Session {
     /// Players a person pulled off deck by hand: they won't be auto-placed again
     /// until the next rotation, so the slot doesn't bounce straight back to them.
     pub skip_round: BTreeSet<PlayerId>,
+    /// Tonight's practice group (e.g. players preparing for a tournament):
+    /// they only play each other, but share the courts fairly with everyone.
+    pub practice: BTreeSet<PlayerId>,
     pub timer: Timer,
     pub round_number: u32,
     /// Wall-clock time of the last change (to notice a session left running
@@ -269,6 +267,7 @@ impl Default for Session {
             court_started_ms: Vec::new(),
             deck: Vec::new(),
             skip_round: BTreeSet::new(),
+            practice: BTreeSet::new(),
             timer: Timer::Idle,
             round_number: 0,
             last_activity_ms: wall_ms(),
@@ -401,6 +400,7 @@ impl AppState {
                 lifetime_games: 0,
                 found_via: String::new(),
                 auto_check_in: false,
+                link: None,
                 from: String::new(),
             },
         );
@@ -413,6 +413,53 @@ impl AppState {
 
     pub fn skill(&self, id: PlayerId) -> Skill {
         self.players.get(&id).map_or(Skill::Intermediate, |p| p.skill)
+    }
+
+    /// The most players who can be linked to play together: one court's worth.
+    pub const MAX_LINKED: usize = 4;
+
+    /// Everyone on the roster linked with `id` (not including them).
+    pub fn linked(&self, id: PlayerId) -> Vec<PlayerId> {
+        let Some(link) = self.players.get(&id).and_then(|p| p.link) else { return Vec::new() };
+        self.players.values().filter(|p| p.id != id && p.link == Some(link)).map(|p| p.id).collect()
+    }
+
+    /// Make `id` play together with exactly `partners` (none: unlink them).
+    /// Partners leave any group they were in; a group left with one person
+    /// dissolves.
+    pub fn set_partners(&mut self, id: PlayerId, partners: &[PlayerId]) {
+        let mut members: Vec<PlayerId> = std::iter::once(id).chain(partners.iter().copied()).filter(|p| self.players.contains_key(p)).collect();
+        members.dedup();
+        members.truncate(Self::MAX_LINKED);
+        for &m in &members {
+            self.unlink(m);
+        }
+        if members.len() >= 2 {
+            // The group is known by its lowest id (never reused, so never shared).
+            let link = Some(*members.iter().min().expect("two or more") as u64);
+            for m in &members {
+                if let Some(p) = self.players.get_mut(m) {
+                    p.link = link;
+                }
+            }
+        }
+    }
+
+    /// Take `id` out of their group.
+    pub fn unlink(&mut self, id: PlayerId) {
+        let rest = self.linked(id);
+        if let Some(p) = self.players.get_mut(&id) {
+            p.link = None;
+        }
+        if rest.len() == 1 {
+            if let Some(p) = self.players.get_mut(&rest[0]) {
+                p.link = None;
+            }
+        }
+    }
+
+    pub fn in_practice(&self, id: PlayerId) -> bool {
+        self.session.practice.contains(&id)
     }
 }
 

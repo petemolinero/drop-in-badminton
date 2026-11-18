@@ -1,16 +1,28 @@
 //! Rotation and matchmaking rules.
 //!
-//! * The waiting pool is ordered by wall-clock time since each player last came
-//!   off a court (or arrived), longest first.
-//! * Empty on-deck slots are always auto-filled from that pool. Each on-deck
-//!   group is seeded with the longest-waiting player, then completed with the
-//!   players closest in skill (ties go to whoever has waited longer).
-//! * Anyone who has waited past `max_wait` is placed next regardless of skill,
-//!   so a lone expert never gets stuck on the bench.
+//! * The waiting list is ordered by time since each player last came off a
+//!   court (or arrived), longest first; ties go to fewer games tonight.
+//! * Up next always takes the next players in line: as many as there are open
+//!   spots (4, 8, 12…). Skill only decides how those players are arranged:
+//!   similar levels share a court, and teams are balanced.
+//! * Linked players (who always play together) share a place in line and a
+//!   wait, and go on one court together. If the cut-off for this round falls
+//!   in the middle of them, they're held back for the next round rather than
+//!   split up, and the next player in line goes instead.
+//! * Tonight's practice group only plays each other. The courts are shared:
+//!   each empty group goes to whichever side has played less tonight (games
+//!   per hour, per person), so time on court evens out across everyone.
 //! * Groups are filled for the courts that have been playing longest first, so
 //!   when there aren't enough people for every court, the courts take turns.
 
 use crate::model::*;
+
+/// Players placed together: one person, or linked players free at once.
+struct Unit {
+    /// Best-placed first.
+    ids: Vec<PlayerId>,
+    practice: bool,
+}
 
 /// Where a dragged player was dropped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,7 +39,12 @@ impl AppState {
         self.session.locate(id).is_some()
     }
 
-    /// Checked-in players who are neither on court nor on deck, longest wait first.
+    /// Checked-in players who are neither on court nor on deck, in the order
+    /// they'll actually go on: the picking is run ahead, round after round,
+    /// with the courts there are. So linked players held back by a cut-off
+    /// appear below whoever goes ahead of them. Anyone who couldn't be picked
+    /// as things stand (say, a practice group too small for a court) follows,
+    /// then anyone on a break.
     pub fn waiting_list(&self, now: i64) -> Vec<PlayerId> {
         let mut ids: Vec<PlayerId> = self
             .session
@@ -37,7 +54,22 @@ impl AppState {
             .filter(|id| !self.is_assigned(*id))
             .collect();
         self.sort_by_priority(&mut ids, now);
-        ids
+        let (mut left, resting): (Vec<PlayerId>, Vec<PlayerId>) = ids.into_iter().partition(|id| !self.session.present[id].resting);
+        let courts = self.session.courts.len().max(1);
+        let mut order = Vec::with_capacity(left.len() + resting.len());
+        while !left.is_empty() {
+            let mut groups = vec![EMPTY_SLOTS; courts];
+            self.fill_groups_from(&mut groups, &(0..courts).collect::<Vec<_>>(), &left, now);
+            let picked: Vec<PlayerId> = left.iter().copied().filter(|id| groups.iter().flatten().any(|s| *s == Some(*id))).collect();
+            if picked.is_empty() {
+                break;
+            }
+            left.retain(|id| !picked.contains(id));
+            order.extend(picked);
+        }
+        order.extend(left);
+        order.extend(resting);
+        order
     }
 
     pub fn waiting_ms(&self, id: PlayerId, now: i64) -> i64 {
@@ -47,20 +79,53 @@ impl AppState {
             .map_or(0, |p| p.waiting_ms(now))
     }
 
+    /// A player's own place-in-line key (smaller goes first).
+    fn own_key(&self, id: PlayerId, now: i64) -> (std::cmp::Reverse<i64>, u32, std::cmp::Reverse<i64>, PlayerId) {
+        let p = &self.session.present[&id];
+        let wait = p.waiting_ms(now);
+        // Waits within the same minute count as equal so that fewer games
+        // tonight breaks the tie (e.g. a whole court that came off together).
+        (std::cmp::Reverse(wait / 60_000), p.games_tonight, std::cmp::Reverse(wait), id)
+    }
+
+    /// Partners of `id` who are in `ids` too and can play alongside them now
+    /// (not on a break, same side of the practice split).
+    fn partners_among(&self, id: PlayerId, ids: &[PlayerId]) -> Vec<PlayerId> {
+        let free = |x: &PlayerId| self.session.present.get(x).is_some_and(|p| !p.resting);
+        if !free(&id) {
+            return Vec::new();
+        }
+        self.linked(id).into_iter().filter(|p| ids.contains(p) && free(p) && self.in_practice(*p) == self.in_practice(id)).collect()
+    }
+
+    /// Linked players waiting together share a place in line: the unit takes
+    /// its best member's place, and its members sit next to each other.
     fn sort_by_priority(&self, ids: &mut [PlayerId], now: i64) {
+        let all: Vec<PlayerId> = ids.to_vec();
         let key = |id: &PlayerId| {
-            let p = &self.session.present[id];
-            let wait = p.waiting_ms(now);
-            // Waits within the same minute count as equal so that fewer games
-            // tonight breaks the tie (e.g. a whole court that came off together).
-            (
-                std::cmp::Reverse(wait / 60_000),
-                p.games_tonight,
-                std::cmp::Reverse(wait),
-                *id,
-            )
+            let own = self.own_key(*id, now);
+            let shared = self.partners_among(*id, &all).into_iter().map(|p| self.own_key(p, now)).fold(own, std::cmp::min);
+            (shared, own)
         };
-        ids.sort_by_key(key);
+        ids.sort_by_cached_key(key);
+    }
+
+    /// Linked players waiting together with `id`, including them (just `[id]`
+    /// if they're not waiting with anyone).
+    pub fn waiting_unit(&self, id: PlayerId) -> Vec<PlayerId> {
+        let waiting = |p: &PlayerId| self.session.present.contains_key(p) && !self.is_assigned(*p);
+        let mut unit = vec![id];
+        if waiting(&id) {
+            let partners: Vec<PlayerId> = self.linked(id).into_iter().filter(|p| waiting(p)).collect();
+            unit.extend(self.partners_among(id, &partners));
+        }
+        unit
+    }
+
+    /// How long `id` has waited, shared with linked players waiting with them
+    /// (the longest of their waits).
+    pub fn shared_wait_ms(&self, id: PlayerId, now: i64) -> i64 {
+        self.waiting_unit(id).into_iter().map(|p| self.waiting_ms(p, now)).max().unwrap_or(0)
     }
 
     /// Players eligible for automatic placement, best candidate first.
@@ -186,7 +251,47 @@ impl AppState {
 
     pub fn delete_player(&mut self, id: PlayerId, now: i64) {
         self.check_out(id, now);
+        self.unlink(id);
+        self.session.practice.remove(&id);
         self.players.remove(&id);
+    }
+
+    /// Link `id` with `partners` (none: unlink them), then re-form any Up next
+    /// group that splits the new link, so they're placed together right away.
+    pub fn link_players(&mut self, id: PlayerId, partners: &[PlayerId], now: i64) {
+        self.set_partners(id, partners);
+        let members: Vec<PlayerId> = std::iter::once(id).chain(self.linked(id)).collect();
+        let free: Vec<PlayerId> = self.candidates(now);
+        let mut groups: Vec<usize> = members
+            .iter()
+            .filter_map(|m| match self.session.locate(*m) {
+                Some(Spot::Deck(g, _)) => Some(g),
+                _ => None,
+            })
+            .collect();
+        groups.sort_unstable();
+        groups.dedup();
+        let split = groups.len() > 1 || (groups.len() == 1 && members.iter().any(|m| free.contains(m)));
+        if split {
+            for g in groups {
+                self.session.deck[g] = EMPTY_SLOTS;
+            }
+            self.fill_deck(now);
+        }
+    }
+
+    /// Set tonight's practice group. Up next groups that now mix the two
+    /// sides are formed again.
+    pub fn set_practice(&mut self, ids: std::collections::BTreeSet<PlayerId>, now: i64) {
+        self.session.practice = ids;
+        let practice = &self.session.practice;
+        for g in &mut self.session.deck {
+            let inside = g.iter().flatten().filter(|id| practice.contains(id)).count();
+            if inside > 0 && inside < g.iter().flatten().count() {
+                *g = EMPTY_SLOTS;
+            }
+        }
+        self.fill_deck(now);
     }
 
     /// Wrap up the current game day: games in progress count as finished
@@ -374,55 +479,197 @@ impl AppState {
         self.session.deck = groups;
     }
 
-    /// Fill the empty slots of `groups` (visited in `order`) from the candidates.
+    /// The candidates as units to place: linked players who are free together
+    /// (and on the same side of the practice split) form one unit. In line
+    /// order, which keeps a unit's members together.
+    fn units(&self, pool: &[PlayerId]) -> Vec<Unit> {
+        let mut used = std::collections::HashSet::new();
+        let mut units = Vec::new();
+        for &id in pool {
+            if !used.insert(id) {
+                continue;
+            }
+            let mut ids = vec![id];
+            for p in self.partners_among(id, pool) {
+                if ids.len() < Self::MAX_LINKED && used.insert(p) {
+                    ids.push(p);
+                }
+            }
+            units.push(Unit { ids, practice: self.in_practice(id) });
+        }
+        units
+    }
+
+    fn unit_rank(&self, unit: &Unit) -> f32 {
+        unit.ids.iter().map(|id| self.skill(*id).rank() as f32).sum::<f32>() / unit.ids.len() as f32
+    }
+
+    /// Games per hour since checking in, averaged over one side's players,
+    /// counting `extra` places already promised to that side as played.
+    fn play_rate(&self, practice: bool, extra: usize, now: i64) -> Option<f64> {
+        let hours: Vec<(u32, f64)> = self
+            .session
+            .present
+            .iter()
+            .filter(|(id, p)| self.in_practice(**id) == practice && !p.resting)
+            // Everyone counts as here at least a round, so a fresh arrival
+            // doesn't look starved.
+            .map(|(_, p)| (p.games_tonight, (now - p.checked_in_ms).max(self.settings.round_ms()) as f64 / 3_600_000.0))
+            .collect();
+        let n = hours.len() as f64;
+        (n > 0.0).then(|| hours.iter().map(|(g, h)| (*g as f64 + extra as f64 / n) / h).sum::<f64>() / n)
+    }
+
+    /// Which side gets an empty group needing `need` players, given the places
+    /// already promised to each side this time (`taken`, general then practice).
+    ///
+    /// Only a side that can fill it gets it (unless neither can). Players on
+    /// court count towards that: at the next round they come off before any
+    /// short group is topped up. Then the side that has played less tonight
+    /// gets it, so time on court evens out across everyone; when that's close,
+    /// whichever side's next players have waited longer. `None`: nobody's free.
+    fn choose_side(&self, units: &[Unit], need: usize, taken: [usize; 2], now: i64) -> Option<bool> {
+        struct Side {
+            fills: bool,
+            any: bool,
+            rate: f64,
+            wait: f64,
+        }
+        let side = |practice: bool| {
+            let t = taken[practice as usize];
+            let all: Vec<PlayerId> = units.iter().filter(|u| u.practice == practice).flat_map(|u| u.ids.iter().copied()).collect();
+            // Places promised beyond who's free come from those coming off court.
+            let borrowed = t.saturating_sub(all.len());
+            let ids = &all[t.min(all.len())..];
+            let next = &ids[..ids.len().min(need)];
+            let wait = next.iter().map(|id| self.waiting_ms(*id, now)).sum::<i64>() as f64 / next.len().max(1) as f64;
+            let on_court = self.session.courts.iter().flatten().flatten().filter(|id| self.in_practice(**id) == practice).count();
+            let coming_off = on_court.saturating_sub(borrowed);
+            Side { fills: ids.len() + coming_off >= need, any: !ids.is_empty(), rate: self.play_rate(practice, t, now).unwrap_or(0.0), wait }
+        };
+        let (general, practice) = (side(false), side(true));
+        match (general.any, practice.any) {
+            (false, false) => return None,
+            (true, false) => return Some(false),
+            (false, true) => return Some(true),
+            _ => {}
+        }
+        if general.fills != practice.fills {
+            return Some(practice.fills);
+        }
+        // Within a few hundredths of a game an hour it's a tie, settled by
+        // who's waited longer (a wider margin lets the smaller side drift
+        // behind, since the bigger side nearly always has someone who's
+        // waited longer).
+        if (general.rate - practice.rate).abs() > 0.02 {
+            return Some(practice.rate < general.rate);
+        }
+        Some(practice.wait > general.wait)
+    }
+
+    /// A group belongs to the practice side if everyone in it is practising.
+    pub fn is_practice_group(&self, group: &Slots) -> bool {
+        let mut members = group.iter().flatten().peekable();
+        members.peek().is_some() && members.all(|id| self.in_practice(*id))
+    }
+
+    /// Fill the empty slots of `groups` (visited in `order`): the next players
+    /// in line, as many as there are open spots, arranged by skill.
     fn fill_groups(&self, groups: &mut [Slots], order: &[usize], now: i64) {
         // Players in `groups` were temporarily taken out of the session, so
         // exclude them explicitly.
         let in_groups: Vec<PlayerId> = groups.iter().flatten().flatten().copied().collect();
-        let mut pool: Vec<PlayerId> = self
-            .candidates(now)
-            .into_iter()
-            .filter(|id| !in_groups.contains(id))
-            .collect();
-        let max_wait = self.settings.max_wait_ms();
+        let pool: Vec<PlayerId> = self.candidates(now).into_iter().filter(|id| !in_groups.contains(id)).collect();
+        self.fill_groups_from(groups, order, &pool, now);
+    }
 
+    /// `fill_groups` from a given line of players (best first).
+    fn fill_groups_from(&self, groups: &mut [Slots], order: &[usize], pool: &[PlayerId], now: i64) {
+        let units = self.units(pool);
+
+        // Which side each group to fill belongs to, and how many it needs.
+        struct Target {
+            g: usize,
+            practice: bool,
+            /// Empty to start with (so free to arrange by skill).
+            empty: bool,
+            free: usize,
+            placed: Vec<usize>,
+        }
+        let mut targets: Vec<Target> = Vec::new();
+        let mut taken = [0usize; 2];
         for &g in order {
-            if pool.is_empty() {
-                break;
+            let free = groups[g].iter().filter(|s| s.is_none()).count();
+            if free == 0 {
+                continue;
             }
-            let group = &mut groups[g];
-            let mut added = false;
-            while let Some(slot) = group.iter().position(Option::is_none) {
-                if pool.is_empty() {
-                    break;
+            let empty = free == 4;
+            let practice = if empty {
+                match self.choose_side(&units, free, taken, now) {
+                    Some(side) => side,
+                    None => break,
                 }
-                let members: Vec<i32> = group
-                    .iter()
-                    .flatten()
-                    .map(|id| self.skill(*id).rank())
-                    .collect();
-                let overdue = self.waiting_ms(pool[0], now) >= max_wait;
-                let pick = if overdue || members.is_empty() || !self.settings.skill_matching {
-                    0
-                } else {
-                    let target = members.iter().sum::<i32>() as f32 / members.len() as f32;
-                    // `pool` is in priority order, so `min_by` keeps the
-                    // longest-waiting player among equally good skill matches.
-                    pool.iter()
-                        .enumerate()
-                        .min_by(|(ia, a), (ib, b)| {
-                            let da = (self.skill(**a).rank() as f32 - target).abs();
-                            let db = (self.skill(**b).rank() as f32 - target).abs();
-                            da.total_cmp(&db).then(ia.cmp(ib))
-                        })
-                        .map_or(0, |(i, _)| i)
-                };
-                group[slot] = Some(pool.remove(pick));
-                added = true;
+            } else {
+                self.is_practice_group(&groups[g])
+            };
+            taken[practice as usize] += free;
+            targets.push(Target { g, practice, empty, free, placed: Vec::new() });
+        }
+
+        // The next units in line take the open spots, each where it fits. A
+        // unit that doesn't fit (linked players the cut-off would split) is
+        // held back for next time, and whoever's next goes instead.
+        for (i, unit) in units.iter().enumerate() {
+            let size = unit.ids.len();
+            if let Some(t) = targets.iter_mut().find(|t| t.practice == unit.practice && t.free >= size) {
+                t.free -= size;
+                t.placed.push(i);
             }
-            if added {
-                self.balance_teams(group);
+        }
+
+        // Arrange the groups that started empty by skill: on each side, the
+        // chosen players sorted by level fill those courts in turn, so similar
+        // levels play together. (If the linked units won't pack that way, the
+        // order they were chosen in is kept.)
+        for practice in [false, true] {
+            let slots: Vec<usize> = (0..targets.len()).filter(|&t| targets[t].practice == practice && targets[t].empty).collect();
+            let mut chosen: Vec<usize> = slots.iter().flat_map(|&t| targets[t].placed.iter().copied()).collect();
+            chosen.sort_by(|&a, &b| self.unit_rank(&units[b]).total_cmp(&self.unit_rank(&units[a])).then(a.cmp(&b)));
+            let mut room: Vec<usize> = slots.iter().map(|&t| 4 - targets[t].free).collect();
+            let mut packed: Vec<Vec<usize>> = vec![Vec::new(); slots.len()];
+            let mut ok = true;
+            for &u in &chosen {
+                let size = units[u].ids.len();
+                // The first group with room: in level order, that's the one
+                // filling up now, or a later one for a unit too big for it.
+                match (0..slots.len()).find(|&k| room[k] >= size) {
+                    Some(k) => {
+                        room[k] -= size;
+                        packed[k].push(u);
+                    }
+                    None => ok = false,
+                }
             }
+            if ok {
+                for (k, &t) in slots.iter().enumerate() {
+                    targets[t].placed = std::mem::take(&mut packed[k]);
+                }
+            }
+        }
+
+        for t in &targets {
+            if t.placed.is_empty() {
+                continue;
+            }
+            let group = &mut groups[t.g];
+            for &u in &t.placed {
+                for &id in &units[u].ids {
+                    if let Some(slot) = group.iter().position(Option::is_none) {
+                        group[slot] = Some(id);
+                    }
+                }
+            }
+            self.balance_teams(group);
         }
     }
 
@@ -442,6 +689,15 @@ impl AppState {
     /// Send on-deck group `c` onto court `c`, topping it up if incomplete.
     /// Returns false if there was nobody on deck for that court.
     pub fn promote_deck(&mut self, c: usize, now: i64) -> bool {
+        let moved = self.swap_in_deck(c, now);
+        if moved {
+            self.top_up(c, now);
+        }
+        moved
+    }
+
+    /// Group `c` walks on and the players on court `c` come off.
+    fn swap_in_deck(&mut self, c: usize, now: i64) -> bool {
         if self.session.deck[c].iter().all(Option::is_none) {
             return false;
         }
@@ -451,9 +707,12 @@ impl AppState {
         }
         self.session.courts[c] = std::mem::replace(&mut self.session.deck[c], EMPTY_SLOTS);
         self.session.court_started_ms[c] = Some(now);
+        true
+    }
 
-        // Top up an incomplete group from the pool (which now includes the
-        // players who just came off).
+    /// Complete a short group that just walked on, from the pool (which now
+    /// includes the players who just came off), and count their games.
+    fn top_up(&mut self, c: usize, now: i64) {
         if self.session.courts[c].iter().any(Option::is_none) {
             let mut courts = std::mem::take(&mut self.session.courts);
             self.fill_groups(&mut courts, &[c], now);
@@ -462,17 +721,18 @@ impl AppState {
         for id in self.session.courts[c].into_iter().flatten() {
             self.mark_on_court(id);
         }
-        true
     }
 
     /// The big button: everyone on deck takes the courts, the deck refills.
     /// Courts with nobody on deck keep playing.
     pub fn next_round(&mut self, now: i64) -> bool {
-        // Promote in court-priority order so top-ups favour the right people.
+        // Everyone due off comes off first, then short groups are topped up
+        // in court-priority order, so top-ups favour the right people.
         let order = self.court_priority();
-        let mut any = false;
-        for c in order {
-            any |= self.promote_deck(c, now);
+        let moved: Vec<usize> = order.iter().copied().filter(|&c| self.swap_in_deck(c, now)).collect();
+        let any = !moved.is_empty();
+        for c in moved {
+            self.top_up(c, now);
         }
         if any {
             self.session.round_number += 1;
@@ -626,13 +886,10 @@ mod tests {
     }
 
     #[test]
-    fn skill_matching_groups_similar_players() {
+    fn similar_levels_share_a_court() {
         use Skill::*;
-        // Arrival order alternates skills; matching should still group them.
-        let (s, _) = setup(
-            &[Beginner, Expert, Beginner, Expert, Beginner, Expert, Beginner, Expert],
-            2,
-        );
+        // The next eight in line alternate levels; arranged, each court is even.
+        let (s, _) = setup(&[Beginner, Expert, Beginner, Expert, Beginner, Expert, Beginner, Expert], 2);
         for g in &s.session.deck {
             let skills: Vec<Skill> = g.iter().flatten().map(|id| s.skill(*id)).collect();
             assert!(skills.iter().all(|k| *k == skills[0]), "mixed group: {skills:?}");
@@ -640,29 +897,47 @@ mod tests {
     }
 
     #[test]
-    fn overdue_player_placed_regardless_of_skill() {
+    fn next_in_line_play_whatever_their_level() {
         use Skill::*;
-        let run = |max_wait: u32| {
-            let mut s = AppState::default();
-            s.settings.courts = 1;
-            s.settings.max_wait_minutes = max_wait;
-            s.sync_court_count(0);
-            let seed = s.add_player("Long wait", Beginner);
-            let ace = s.add_player("Ace", Expert);
-            let fresh: Vec<_> = (0..3).map(|i| s.add_player(&format!("B{i}"), Beginner)).collect();
-            let now = 60 * MIN;
-            s.session.present.insert(seed, Presence::new(now - 25 * MIN));
-            s.session.present.insert(ace, Presence::new(now - 22 * MIN));
-            for b in &fresh {
-                s.session.present.insert(*b, Presence::new(now - MIN));
-            }
-            s.fill_deck(now);
-            s.session.deck[0].contains(&Some(ace))
-        };
-        // Generous max wait: the beginner group stays pure and the expert waits.
-        assert!(!run(60));
-        // Expert is past the 20 minute max wait, so they go in anyway.
-        assert!(run(20));
+        let mut s = AppState::default();
+        s.settings.courts = 1;
+        s.sync_court_count(0);
+        let now = 60 * MIN;
+        // Four have waited longest; a beginner who arrived later is a closer
+        // match for three of them but isn't next, so doesn't play.
+        let first: Vec<_> = [Beginner, Expert, Beginner, Beginner].iter().enumerate().map(|(i, k)| s.add_player(&format!("W{i}"), *k)).collect();
+        let late = s.add_player("Late", Beginner);
+        for (i, id) in first.iter().enumerate() {
+            s.session.present.insert(*id, Presence::new(now - (30 - i as i64) * MIN));
+        }
+        s.session.present.insert(late, Presence::new(now - MIN));
+        s.fill_deck(now);
+        let mut deck: Vec<_> = s.session.deck[0].iter().flatten().copied().collect();
+        deck.sort();
+        assert_eq!(deck, first);
+    }
+
+    #[test]
+    fn linked_players_split_by_the_cut_off_wait_a_round() {
+        let mut s = AppState::default();
+        s.settings.courts = 1;
+        s.sync_court_count(0);
+        let ids: Vec<_> = (0..6).map(|i| s.add_player(&format!("P{i}"), Skill::Intermediate)).collect();
+        for (i, id) in ids.iter().enumerate() {
+            s.session.present.insert(*id, Presence::new(i as i64 * MIN));
+        }
+        // P3 and P4 are linked: they share P3's place, 4th and 5th in line, so
+        // one court's cut-off would split them. They wait; P5 goes instead.
+        s.link_players(ids[3], &[ids[4]], 10 * MIN);
+        s.fill_deck(10 * MIN);
+        assert_eq!(s.waiting_list(10 * MIN), vec![ids[3], ids[4]], "held back, together");
+        assert_eq!(s.shared_wait_ms(ids[4], 10 * MIN), s.waiting_ms(ids[3], 10 * MIN), "they share the longer wait");
+        let mut deck: Vec<_> = s.session.deck[0].iter().flatten().copied().collect();
+        deck.sort();
+        assert_eq!(deck, vec![ids[0], ids[1], ids[2], ids[5]]);
+        // Next round they're at the front, and go on together.
+        s.next_round(11 * MIN);
+        assert!(s.session.deck[0].contains(&Some(ids[3])) && s.session.deck[0].contains(&Some(ids[4])));
     }
 
     #[test]
@@ -755,6 +1030,98 @@ mod tests {
         s.new_day(8 * 86_400_000, 0);
         assert_eq!(s.session.present.keys().copied().collect::<Vec<_>>(), vec![late]);
         assert_eq!(s.session.attendance[0].in_ms, 8 * 86_400_000);
+    }
+
+    fn group_of(s: &AppState, id: PlayerId) -> Option<(bool, usize)> {
+        match s.session.locate(id)? {
+            Spot::Court(c, _) => Some((true, c)),
+            Spot::Deck(c, _) => Some((false, c)),
+        }
+    }
+
+    #[test]
+    fn linked_players_share_a_court() {
+        // P0 arrived first and P9 last; linked, they still go on together.
+        let (mut s, ids) = setup(&[Skill::Intermediate; 10], 2);
+        s.link_players(ids[0], &[ids[9]], 20_000);
+        assert!(group_of(&s, ids[0]).is_some());
+        assert_eq!(group_of(&s, ids[0]), group_of(&s, ids[9]));
+        // Through several rounds, whenever they're both placed it's together.
+        for round in 1..8 {
+            s.next_round(round * 15 * MIN);
+            if let (Some(a), Some(b)) = (group_of(&s, ids[0]), group_of(&s, ids[9])) {
+                assert_eq!(a, b, "split up in round {round}");
+            }
+        }
+        // Unlinked, they're on their own again.
+        s.unlink(ids[0]);
+        assert!(s.linked(ids[9]).is_empty());
+    }
+
+    #[test]
+    fn linked_trio_never_starves() {
+        let (mut s, ids) = setup(&[Skill::Intermediate; 11], 2);
+        s.set_partners(ids[8], &[ids[9], ids[10]]);
+        let mut played = 0;
+        for round in 1..10 {
+            s.next_round(round * 15 * MIN);
+            let on: Vec<_> = (8..11).map(|i| group_of(&s, ids[i])).collect();
+            if on[0].is_some_and(|(court, _)| court) {
+                assert!(on.iter().all(|g| *g == on[0]));
+                played += 1;
+            }
+        }
+        assert!(played >= 3, "the trio played {played} of 9 rounds");
+    }
+
+    /// `n` players on `courts` courts for `rounds` rounds, `k` of them practising.
+    /// Returns the games played by the practice side and everyone else.
+    fn practice_night(n: usize, k: usize, courts: usize, rounds: i64) -> (Vec<u32>, Vec<u32>) {
+        let skills: Vec<Skill> = (0..n).map(|i| Skill::ALL[i % 4]).collect();
+        let (mut s, ids) = setup(&skills, courts);
+        let practice: std::collections::BTreeSet<_> = ids.iter().copied().step_by(n / k).take(k).collect();
+        s.set_practice(practice.clone(), 20_000);
+        for round in 1..=rounds {
+            s.next_round(round * 15 * MIN);
+            if std::env::var("TRACE").is_ok() {
+                let on = |gs: &Vec<Slots>| gs.iter().map(|g| g.iter().flatten().filter(|id| practice.contains(id)).count()).collect::<Vec<_>>();
+                eprintln!("round {round}: practice on courts {:?}, up next {:?}", on(&s.session.courts), on(&s.session.deck));
+            }
+            for g in s.session.courts.iter().chain(&s.session.deck) {
+                let sides: Vec<bool> = g.iter().flatten().map(|id| practice.contains(id)).collect();
+                assert!(sides.iter().all(|x| *x == sides[0]), "mixed group in round {round}: {g:?}");
+            }
+        }
+        let games = |inside: bool| ids.iter().filter(|id| practice.contains(id) == inside).map(|id| s.session.present[id].games_tonight).collect();
+        (games(true), games(false))
+    }
+
+    #[test]
+    fn practice_group_plays_only_each_other_and_gets_fair_time() {
+        let mean = |v: &[u32]| v.iter().sum::<u32>() as f32 / v.len() as f32;
+        // (players, practising, courts): a small night, and the 17-of-70 one.
+        for (n, k, courts) in [(26, 7, 3), (70, 17, 6), (40, 9, 4), (30, 5, 3)] {
+            let (inside, outside) = practice_night(n, k, courts, 24);
+            let (a, b) = (mean(&inside), mean(&outside));
+            eprintln!("{n} players, {k} practising, {courts} courts: practice {a:.2} games each, others {b:.2} · practice {inside:?}");
+            assert!((a - b).abs() <= 0.6, "{n}/{k}/{courts}: practice averaged {a:.1} games, everyone else {b:.1}");
+            let all: Vec<u32> = inside.iter().chain(&outside).copied().collect();
+            assert!(all.iter().max().unwrap() - all.iter().min().unwrap() <= 2, "{n}/{k}/{courts} uneven: {all:?}");
+        }
+    }
+
+    #[test]
+    fn waiting_list_shows_the_real_picking_order() {
+        let (mut s, ids) = setup(&[Skill::Intermediate; 10], 1);
+        // P0–P3 are up next. Next in line: P4, P5, P6, then P7 and P8 linked —
+        // but only one place is left for them, so they wait and P9 goes first.
+        s.link_players(ids[7], &[ids[8]], 20_000);
+        assert_eq!(s.waiting_list(20_000), vec![ids[4], ids[5], ids[6], ids[9], ids[7], ids[8]]);
+        // And that's what happens.
+        s.next_round(MIN);
+        let mut deck: Vec<_> = s.session.deck[0].iter().flatten().copied().collect();
+        deck.sort();
+        assert_eq!(deck, vec![ids[4], ids[5], ids[6], ids[9]]);
     }
 
     #[test]

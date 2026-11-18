@@ -59,6 +59,8 @@ pub mod icon {
     pub const LOCK: &str = "\u{e790}";
     pub const LOCK_OPEN: &str = "\u{e796}";
     pub const EXPORT: &str = "\u{f0527}";
+    pub const LINK: &str = "\u{f4e5}";
+    pub const TROPHY: &str = "\u{f837}";
     pub const PLAY_F: &str = "\u{100000}";
     pub const PAUSE_F: &str = "\u{100001}";
     pub const NEXT_F: &str = "\u{100002}";
@@ -72,6 +74,8 @@ pub mod icon {
     pub const TIMER_F: &str = "\u{10000a}";
     pub const QUESTION_F: &str = "\u{10000b}";
     pub const DOWNLOAD_F: &str = "\u{10000c}";
+    pub const TROPHY_F: &str = "\u{10000d}";
+    pub const LINK_F: &str = "\u{10000e}";
 }
 
 pub const ICONS: &str = "icons";
