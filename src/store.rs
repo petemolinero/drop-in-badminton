@@ -19,6 +19,22 @@ use crate::model::*;
 
 pub struct Store {
     conn: Connection,
+    /// Set when the data is password-protected: the database then lives in
+    /// memory and every change is written out sealed with this key.
+    vault: Option<crate::vault::Key>,
+    /// The folder the data lives in (`None`: in memory only, for tests and
+    /// when the file couldn't be opened).
+    dir: Option<PathBuf>,
+}
+
+/// Why a password-protected data file wouldn't open.
+pub enum UnlockError {
+    WrongPassword,
+    Other(String),
+}
+
+fn io_error(err: impl std::fmt::Display) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR), Some(err.to_string()))
 }
 
 const SCHEMA: &str = "
@@ -153,8 +169,21 @@ fn skill_from_str(s: &str) -> Skill {
         .unwrap_or(Skill::Intermediate)
 }
 
+const DB_FILE: &str = "drop-in-badminton.db";
+/// The data file when a password is set (encrypted; replaces the database).
+const VAULT_FILE: &str = "drop-in-badminton.db.enc";
+
 pub fn db_path() -> PathBuf {
-    data_dir().join("drop-in-badminton.db")
+    data_dir().join(DB_FILE)
+}
+
+pub fn vault_path() -> PathBuf {
+    data_dir().join(VAULT_FILE)
+}
+
+/// Whether the data is password-protected (so the app must ask first).
+pub fn is_locked() -> bool {
+    vault_path().exists()
 }
 
 impl Store {
@@ -164,7 +193,7 @@ impl Store {
             let _ = std::fs::create_dir_all(dir);
         }
         Self::adopt_old_name(&path);
-        let store = Self::open(&path)?;
+        let mut store = Self::open(&path)?;
         store.import_legacy_json(&data_dir().join("state.json"));
         Ok(store)
     }
@@ -172,7 +201,9 @@ impl Store {
     /// The app used to be called Goodminton: on first run under the new name,
     /// bring that database over (a consistent copy; the old file is kept).
     fn adopt_old_name(path: &Path) {
-        if path.exists() {
+        // Only on the very first run: not once there's protected data, or
+        // backups (say, after starting over without the password).
+        if path.exists() || vault_path().exists() || data_dir().join("backups").exists() {
             return;
         }
         let Some(old_dir) = directories::ProjectDirs::from("app", "goodminton", "goodminton") else { return };
@@ -189,7 +220,13 @@ impl Store {
 
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
-        Self::init(conn)
+        let mut store = Self::init(conn)?;
+        store.dir = path.parent().map(Path::to_path_buf);
+        Ok(store)
+    }
+
+    fn dir(&self) -> rusqlite::Result<&Path> {
+        self.dir.as_deref().ok_or_else(|| io_error("the data isn't saved to a file"))
     }
 
     pub fn open_in_memory() -> rusqlite::Result<Self> {
@@ -218,7 +255,134 @@ impl Store {
                 conn.execute_batch(ddl)?;
             }
         }
-        Ok(Self { conn })
+        Ok(Self { conn, vault: None, dir: None })
+    }
+
+    // ----- Password protection -----------------------------------------------
+
+    /// Open the password-protected data file.
+    pub fn unlock(password: &str) -> Result<Self, UnlockError> {
+        Self::unlock_in(&data_dir(), password)
+    }
+
+    fn unlock_in(dir: &Path, password: &str) -> Result<Self, UnlockError> {
+        let file = std::fs::read(dir.join(VAULT_FILE)).map_err(|e| UnlockError::Other(e.to_string()))?;
+        let (key, plain) = match crate::vault::open(password, &file) {
+            Ok(opened) => opened,
+            Err(crate::vault::VaultError::WrongPassword) => return Err(UnlockError::WrongPassword),
+            Err(err) => return Err(UnlockError::Other(err.to_string())),
+        };
+        let mut store = Self::from_bytes(&plain).map_err(|e| UnlockError::Other(e.to_string()))?;
+        store.vault = Some(key);
+        store.dir = Some(dir.to_path_buf());
+        Ok(store)
+    }
+
+    /// A database held in memory, from a whole database file's bytes.
+    fn from_bytes(bytes: &[u8]) -> rusqlite::Result<Self> {
+        let mut bytes = bytes.to_vec();
+        // A copy of a database in WAL mode says so in its header (bytes 18
+        // and 19), and SQLite would go looking for the WAL file; in memory
+        // it's an ordinary rollback-journal database.
+        if bytes.len() > 19 {
+            bytes[18] = 1;
+            bytes[19] = 1;
+        }
+        let mut conn = Connection::open_in_memory()?;
+        conn.deserialize_read_exact(rusqlite::MAIN_DB, &bytes[..], bytes.len(), false)?;
+        Self::init(conn)
+    }
+
+    /// The whole database as a file's bytes.
+    fn to_bytes(&mut self) -> rusqlite::Result<Vec<u8>> {
+        Ok(self.conn.serialize(rusqlite::MAIN_DB)?.to_vec())
+    }
+
+    pub fn has_password(&self) -> bool {
+        self.vault.is_some()
+    }
+
+    pub fn password_matches(&self, password: &str) -> bool {
+        self.vault.as_ref().is_some_and(|k| k.matches(password))
+    }
+
+    /// Write the encrypted file (password-protected only; otherwise SQLite
+    /// has already written the change).
+    fn persist(&mut self) -> rusqlite::Result<()> {
+        let Some(key) = self.vault.clone() else { return Ok(()) };
+        let bytes = self.to_bytes()?;
+        let path = self.dir()?.join(VAULT_FILE);
+        crate::vault::write_atomic(&path, &crate::vault::seal(&key, &bytes)).map_err(io_error)
+    }
+
+    /// Protect the data with a password: from now on it's only ever written
+    /// to disk encrypted, and the readable copies (the database, its backups)
+    /// are removed. Also used to change the password.
+    pub fn set_password(&mut self, password: &str) -> rusqlite::Result<()> {
+        let dir = self.dir()?.to_path_buf();
+        let old = self.vault.clone();
+        let key = crate::vault::Key::new(password);
+        let bytes = self.to_bytes()?;
+        let sealed = crate::vault::seal(&key, &bytes);
+        // Check it opens before anything readable is removed.
+        if crate::vault::open_with(&key, &sealed).ok().as_deref() != Some(&bytes[..]) {
+            return Err(io_error("couldn't verify the encrypted copy"));
+        }
+        crate::vault::write_atomic(&dir.join(VAULT_FILE), &sealed).map_err(io_error)?;
+        if old.is_none() {
+            // Switch to the copy in memory, then remove the readable files.
+            *self = Self::from_bytes(&bytes)?;
+            self.dir = Some(dir.clone());
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(dir.join(format!("{DB_FILE}{suffix}")));
+            }
+            // An old import, long since copied into the database.
+            let _ = std::fs::remove_file(dir.join("state.json.imported"));
+        }
+        self.vault = Some(key.clone());
+        Self::rekey_backups(&dir, old.as_ref(), Some(&key));
+        Ok(())
+    }
+
+    /// Stop protecting the data: write it out readable again.
+    pub fn remove_password(&mut self) -> rusqlite::Result<()> {
+        let Some(old) = self.vault.clone() else { return Ok(()) };
+        let dir = self.dir()?.to_path_buf();
+        let bytes = self.to_bytes()?;
+        crate::vault::write_atomic(&dir.join(DB_FILE), &bytes).map_err(io_error)?;
+        *self = Self::open(&dir.join(DB_FILE))?;
+        let _ = std::fs::remove_file(dir.join(VAULT_FILE));
+        Self::rekey_backups(&dir, Some(&old), None);
+        Ok(())
+    }
+
+    /// Re-seal every backup for a new key (`None`: write them readable).
+    fn rekey_backups(dir: &Path, old: Option<&crate::vault::Key>, new: Option<&crate::vault::Key>) {
+        let Ok(entries) = std::fs::read_dir(dir.join("backups")) else { return };
+        for path in entries.flatten().map(|e| e.path()) {
+            let name = path.to_string_lossy().into_owned();
+            let (sealed, base) = match name.strip_suffix(".enc") {
+                Some(base) if base.ends_with(".db") => (true, base.to_owned()),
+                None if name.ends_with(".db") => (false, name.clone()),
+                _ => continue,
+            };
+            let Ok(file) = std::fs::read(&path) else { continue };
+            let plain = match (sealed, old) {
+                (false, _) => file,
+                (true, Some(old)) => match crate::vault::open_with(old, &file) {
+                    Ok(plain) => plain,
+                    Err(_) => continue, // sealed with some other key: leave it
+                },
+                (true, None) => continue,
+            };
+            let (target, bytes) = match new {
+                Some(key) => (format!("{base}.enc"), crate::vault::seal(key, &plain)),
+                None => (base, plain),
+            };
+            if crate::vault::write_atomic(Path::new(&target), &bytes).is_ok() && target != name {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
     }
 
     fn meta(&self, key: &str) -> rusqlite::Result<Option<String>> {
@@ -228,24 +392,37 @@ impl Store {
     }
 
     /// Record which app version opened this database; returns the previous one.
-    pub fn swap_app_version(&self, current: &str) -> Option<String> {
+    pub fn swap_app_version(&mut self, current: &str) -> Option<String> {
         let previous = self.meta("app_version").ok().flatten();
         let _ = self.conn.execute(
             "INSERT INTO meta(key, value) VALUES ('app_version', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [current],
         );
+        if previous.as_deref() != Some(current) {
+            let _ = self.persist();
+        }
         previous
     }
 
-    /// A consistent copy of the whole database, safe to take while it's open.
-    pub fn backup_to(&self, path: &Path) -> rusqlite::Result<()> {
-        self.conn.execute("VACUUM INTO ?1", [path.to_string_lossy()])?;
-        Ok(())
+    /// A consistent copy of the whole database, safe to take while it's open
+    /// (encrypted too, with `.enc` added to the name, if the data is).
+    pub fn backup_to(&mut self, path: &Path) -> rusqlite::Result<()> {
+        match self.vault.clone() {
+            Some(key) => {
+                let bytes = self.to_bytes()?;
+                let path = PathBuf::from(format!("{}.enc", path.display()));
+                crate::vault::write_atomic(&path, &crate::vault::seal(&key, &bytes)).map_err(io_error)
+            }
+            None => {
+                self.conn.execute("VACUUM INTO ?1", [path.to_string_lossy()])?;
+                Ok(())
+            }
+        }
     }
 
     /// One-time import from the JSON file earlier versions used.
-    fn import_legacy_json(&self, path: &Path) {
+    fn import_legacy_json(&mut self, path: &Path) {
         if self.meta("settings").ok().flatten().is_some() {
             return;
         }
@@ -320,7 +497,7 @@ impl Store {
     }
 
     /// Write everything. May assign `state.session.day_id`.
-    pub fn save(&self, state: &mut AppState) -> rusqlite::Result<()> {
+    pub fn save(&mut self, state: &mut AppState) -> rusqlite::Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         Self::save_players(&tx, &state.players)?;
         Self::save_day(&tx, &mut state.session)?;
@@ -333,7 +510,8 @@ impl Store {
                 params![k, v],
             )?;
         }
-        tx.commit()
+        tx.commit()?;
+        self.persist()
     }
 
     fn save_players(tx: &Transaction, players: &BTreeMap<PlayerId, Player>) -> rusqlite::Result<()> {
@@ -525,7 +703,7 @@ impl Store {
 
     /// Rewrite a game from a past session (the current session's games are
     /// edited in memory and saved with it instead).
-    pub fn update_game(&self, id: i64, g: &GameRecord) -> rusqlite::Result<()> {
+    pub fn update_game(&mut self, id: i64, g: &GameRecord) -> rusqlite::Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "UPDATE games SET round = ?2, court = ?3, started_at = ?4, ended_at = ?5 WHERE id = ?1",
@@ -541,24 +719,25 @@ impl Store {
                 )?;
             }
         }
-        tx.commit()
+        tx.commit()?;
+        self.persist()
     }
 
     /// Remove a game from a past session.
-    pub fn delete_game(&self, id: i64) -> rusqlite::Result<()> {
+    pub fn delete_game(&mut self, id: i64) -> rusqlite::Result<()> {
         self.conn.execute("DELETE FROM games WHERE id = ?1", [id])?;
-        Ok(())
+        self.persist()
     }
 
     /// Edit a player who's no longer on the roster (roster players are saved
     /// from the app state instead).
-    pub fn update_archived_player(&self, p: &Player) -> rusqlite::Result<()> {
+    pub fn update_archived_player(&mut self, p: &Player) -> rusqlite::Result<()> {
         self.conn.execute(
             "UPDATE players SET name = ?2, skill = ?3, found_via = ?4, home = ?5, auto_check_in = ?6
              WHERE id = ?1 AND archived = 1",
             params![p.id as i64, p.name, skill_to_str(p.skill), p.found_via.trim(), p.from.trim(), p.auto_check_in],
         )?;
-        Ok(())
+        self.persist()
     }
 
     pub fn days(&self) -> rusqlite::Result<Vec<DaySummary>> {
@@ -668,7 +847,7 @@ mod tests {
              INSERT INTO players(id, name, skill) VALUES (1, 'Ann', 'Advanced');",
         )
         .unwrap();
-        let store = Store::init(conn).unwrap();
+        let mut store = Store::init(conn).unwrap();
         let mut s = store.load().unwrap();
         assert_eq!((s.players[&1].from.as_str(), s.players[&1].found_via.as_str()), ("", ""));
         assert!(!s.players[&1].auto_check_in);
@@ -684,8 +863,44 @@ mod tests {
     }
 
     #[test]
+    fn a_password_encrypts_everything_and_can_be_changed_or_removed() {
+        let dir = std::env::temp_dir().join(format!("dib-vault-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("backups")).unwrap();
+        let mut store = Store::open(&dir.join(DB_FILE)).unwrap();
+        let mut s = AppState::default();
+        s.add_player("Zebedee Quartermaine", Skill::Expert);
+        store.save(&mut s).unwrap();
+        store.backup_to(&dir.join("backups/old.db")).unwrap();
+        let readable = |path: &Path| std::fs::read(path).is_ok_and(|b| b.windows(9).any(|w| w == b"Zebedee Q"));
+        assert!(readable(&dir.join(DB_FILE)) || readable(&dir.join(format!("{DB_FILE}-wal"))));
+
+        store.set_password("hunter22").unwrap();
+        assert!(!dir.join(DB_FILE).exists() && !dir.join(format!("{DB_FILE}-wal")).exists(), "readable copies removed");
+        assert!(!readable(&dir.join(VAULT_FILE)));
+        assert!(!dir.join("backups/old.db").exists() && !readable(&dir.join("backups/old.db.enc")), "backups encrypted");
+        s.add_player("Second Person", Skill::Beginner);
+        store.save(&mut s).unwrap();
+        drop(store);
+
+        assert!(matches!(Store::unlock_in(&dir, "wrong"), Err(UnlockError::WrongPassword)));
+        let Ok(mut store) = Store::unlock_in(&dir, "hunter22") else { panic!("didn't unlock") };
+        assert_eq!(store.load().unwrap().players.len(), 2, "changes made while locked were saved");
+
+        store.set_password("new one").unwrap();
+        drop(store);
+        assert!(Store::unlock_in(&dir, "hunter22").is_err());
+        let Ok(mut store) = Store::unlock_in(&dir, "new one") else { panic!("didn't unlock") };
+        assert!(store.password_matches("new one"));
+        store.remove_password().unwrap();
+        assert!(!dir.join(VAULT_FILE).exists() && dir.join("backups/old.db").exists());
+        assert_eq!(Store::open(&dir.join(DB_FILE)).unwrap().load().unwrap().players.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn past_games_can_be_edited_and_removed() {
-        let store = Store::open_in_memory().unwrap();
+        let mut store = Store::open_in_memory().unwrap();
         let mut s = AppState::default();
         let ids: Vec<PlayerId> = ["Ann", "Bo", "Cy", "Di", "Ed"].iter().map(|n| s.add_player(n, Skill::Intermediate)).collect();
         s.session.clock = SessionClock::starting(1_000, 0);
@@ -713,7 +928,7 @@ mod tests {
 
     #[test]
     fn round_trip_and_history() {
-        let store = Store::open_in_memory().unwrap();
+        let mut store = Store::open_in_memory().unwrap();
         let mut s = AppState::default();
         s.settings.courts = 1;
         s.sync_court_count(0);

@@ -17,6 +17,16 @@
 
 use crate::model::*;
 
+/// Who's waiting, in the order they'll go on.
+pub struct WaitingLine {
+    /// One round's worth each, first first.
+    pub groups: Vec<Vec<PlayerId>>,
+    /// Can't be placed as things stand (say, a practice group too small for a court).
+    pub stuck: Vec<PlayerId>,
+    /// On a break.
+    pub resting: Vec<PlayerId>,
+}
+
 /// Players placed together: one person, or linked players free at once.
 struct Unit {
     /// Best-placed first.
@@ -40,12 +50,17 @@ impl AppState {
     }
 
     /// Checked-in players who are neither on court nor on deck, in the order
-    /// they'll actually go on: the picking is run ahead, round after round,
-    /// with the courts there are. So linked players held back by a cut-off
-    /// appear below whoever goes ahead of them. Anyone who couldn't be picked
-    /// as things stand (say, a practice group too small for a court) follows,
-    /// then anyone on a break.
+    /// they'll actually go on (see `waiting_line`).
     pub fn waiting_list(&self, now: i64) -> Vec<PlayerId> {
+        let line = self.waiting_line(now);
+        line.groups.into_iter().flatten().chain(line.stuck).chain(line.resting).collect()
+    }
+
+    /// The waiting players as they'll go on: the picking is run ahead, round
+    /// after round, with the courts there are, so each group is one round's
+    /// worth (4 a court). Linked players held back by a cut-off land in a
+    /// later group than whoever goes ahead of them.
+    pub fn waiting_line(&self, now: i64) -> WaitingLine {
         let mut ids: Vec<PlayerId> = self
             .session
             .present
@@ -56,20 +71,18 @@ impl AppState {
         self.sort_by_priority(&mut ids, now);
         let (mut left, resting): (Vec<PlayerId>, Vec<PlayerId>) = ids.into_iter().partition(|id| !self.session.present[id].resting);
         let courts = self.session.courts.len().max(1);
-        let mut order = Vec::with_capacity(left.len() + resting.len());
+        let mut groups = Vec::new();
         while !left.is_empty() {
-            let mut groups = vec![EMPTY_SLOTS; courts];
-            self.fill_groups_from(&mut groups, &(0..courts).collect::<Vec<_>>(), &left, now);
-            let picked: Vec<PlayerId> = left.iter().copied().filter(|id| groups.iter().flatten().any(|s| *s == Some(*id))).collect();
+            let mut slots = vec![EMPTY_SLOTS; courts];
+            self.fill_groups_from(&mut slots, &(0..courts).collect::<Vec<_>>(), &left, now);
+            let picked: Vec<PlayerId> = left.iter().copied().filter(|id| slots.iter().flatten().any(|s| *s == Some(*id))).collect();
             if picked.is_empty() {
                 break;
             }
             left.retain(|id| !picked.contains(id));
-            order.extend(picked);
+            groups.push(picked);
         }
-        order.extend(left);
-        order.extend(resting);
-        order
+        WaitingLine { groups, stuck: left, resting }
     }
 
     pub fn waiting_ms(&self, id: PlayerId, now: i64) -> i64 {
@@ -323,10 +336,39 @@ impl AppState {
         }
     }
 
+    /// Whether the game on court `c` already ended when the timer ran out
+    /// (its players are still there until Next round).
+    pub fn game_over(&self, c: usize) -> bool {
+        let started = self.session.court_started_ms.get(c).copied().flatten();
+        matches!((started, self.session.round_closed_ms), (Some(s), Some(closed)) if s <= closed)
+    }
+
+    /// The timer has run out: every game on court ends now, as at Next round
+    /// (logged, and their players' waits start again from the moment it hit
+    /// zero), so Next round won't do it again. Once per run of the timer.
+    /// Returns whether anything changed.
+    pub fn close_round_if_time_up(&mut self, now: i64) -> bool {
+        let Timer::Running { end_ms } = self.session.timer else { return false };
+        if now < end_ms || self.session.round_closed_ms.is_some_and(|c| c >= end_ms) {
+            return false;
+        }
+        for c in 0..self.session.courts.len() {
+            if self.game_over(c) {
+                continue;
+            }
+            self.record_game(c, end_ms);
+            for id in self.session.courts[c].into_iter().flatten() {
+                self.mark_off_court(id, end_ms);
+            }
+        }
+        self.session.round_closed_ms = Some(end_ms);
+        true
+    }
+
     /// Log the game currently on court `c` as finished at `now`.
     fn record_game(&mut self, c: usize, now: i64) {
         let players = self.session.courts[c];
-        if players.iter().all(Option::is_none) {
+        if players.iter().all(Option::is_none) || self.game_over(c) {
             return;
         }
         let Some(started_ms) = self.session.court_started_ms[c] else { return };
@@ -347,13 +389,13 @@ impl AppState {
         }
     }
 
-    /// A player leaves court `c` other than by rotation. If the game there has
-    /// run its full length it counts as played; otherwise it's as if they never
-    /// went on: their wait keeps counting from before and the game isn't counted.
-    fn leave_court(&mut self, id: PlayerId, c: usize, now: i64) {
-        let full_game = self.session.court_started_ms[c].is_some_and(|start| now - start >= self.settings.round_ms());
-        if full_game {
-            self.mark_off_court(id, now);
+    /// A player leaves court `c` before its game has ended (say, they never
+    /// showed up and were replaced). A game ends at Next round or when the
+    /// timer runs out, so it's as if they never went on: their wait keeps
+    /// counting from before, so they're still near the front of the line, and
+    /// the game isn't counted. (After the game ended, it stays counted.)
+    fn leave_court(&mut self, id: PlayerId, c: usize, _now: i64) {
+        if self.game_over(c) {
             return;
         }
         if let Some(p) = self.session.present.get_mut(&id) {
@@ -398,7 +440,8 @@ impl AppState {
         let was_on_court = matches!(from, Some(Spot::Court(..)));
         match to {
             Spot::Court(c, _) => {
-                if !was_on_court {
+                // Joining a game that's already over doesn't count as one.
+                if !was_on_court && !self.game_over(c) {
                     self.mark_on_court(id);
                 }
                 if self.session.court_started_ms[c].is_none() {
@@ -701,9 +744,12 @@ impl AppState {
         if self.session.deck[c].iter().all(Option::is_none) {
             return false;
         }
-        self.record_game(c, now);
-        for id in self.session.courts[c].into_iter().flatten() {
-            self.mark_off_court(id, now);
+        // Unless the timer already ended this game (and restarted their waits).
+        if !self.game_over(c) {
+            self.record_game(c, now);
+            for id in self.session.courts[c].into_iter().flatten() {
+                self.mark_off_court(id, now);
+            }
         }
         self.session.courts[c] = std::mem::replace(&mut self.session.deck[c], EMPTY_SLOTS);
         self.session.court_started_ms[c] = Some(now);
@@ -731,8 +777,18 @@ impl AppState {
         let order = self.court_priority();
         let moved: Vec<usize> = order.iter().copied().filter(|&c| self.swap_in_deck(c, now)).collect();
         let any = !moved.is_empty();
-        for c in moved {
+        for &c in &moved {
             self.top_up(c, now);
+        }
+        // A court with nobody up next keeps playing: if the timer ended its
+        // game, this is a new one.
+        for c in 0..self.session.courts.len() {
+            if !moved.contains(&c) && self.game_over(c) && self.session.courts[c].iter().any(Option::is_some) {
+                self.session.court_started_ms[c] = Some(now);
+                for id in self.session.courts[c].into_iter().flatten() {
+                    self.mark_on_court(id);
+                }
+            }
         }
         if any {
             self.session.round_number += 1;
@@ -968,7 +1024,7 @@ mod tests {
     }
 
     #[test]
-    fn leaving_court_early_keeps_wait_but_full_game_resets_it() {
+    fn only_next_round_resets_a_wait() {
         let (mut s, _) = setup(&[Skill::Intermediate; 8], 1);
         let round = s.settings.round_ms();
         s.next_round(MIN);
@@ -979,20 +1035,23 @@ mod tests {
         assert_eq!(before.games_tonight, 1);
         let lifetime = s.players[&a].lifetime_games;
 
-        // Sent to waiting 5 minutes into a game: wait keeps counting from before.
+        // Sent to waiting mid-game: wait keeps counting from before, game not counted.
         let t = MIN + round + 5 * MIN;
         s.move_player(a, Target::Pool, t);
         let p = &s.session.present[&a];
         assert_eq!(p.last_played_ms, before.last_played_ms, "wait not reset");
-        assert_eq!(p.waiting_ms(t), before.waiting_ms(t));
         assert_eq!(p.games_tonight, 0, "unfinished game not counted");
         assert_eq!(s.players[&a].lifetime_games, lifetime - 1);
 
-        // Taken off after the full round length: that game counts.
-        let t2 = MIN + 2 * round;
-        s.move_player(b, Target::Pool, t2);
-        assert_eq!(s.session.present[&b].last_played_ms, Some(t2));
-        assert_eq!(s.session.present[&b].games_tonight, 1);
+        // Even long after the round's time is up, until Next round.
+        let before = s.session.present[&b].clone();
+        s.move_player(b, Target::Pool, MIN + 3 * round);
+        assert_eq!(s.session.present[&b].last_played_ms, before.last_played_ms);
+
+        // Whoever's on court at Next round has played.
+        let c = s.session.courts[0][2].unwrap();
+        s.next_round(MIN + 4 * round);
+        assert_eq!(s.session.present[&c].last_played_ms, Some(MIN + 4 * round));
     }
 
     #[test]
@@ -1122,6 +1181,68 @@ mod tests {
         let mut deck: Vec<_> = s.session.deck[0].iter().flatten().copied().collect();
         deck.sort();
         assert_eq!(deck, vec![ids[4], ids[5], ids[6], ids[9]]);
+    }
+
+    #[test]
+    fn no_show_taken_off_court_keeps_their_wait() {
+        let (mut s, _) = setup(&[Skill::Intermediate; 14], 2);
+        for r in 1..=3 {
+            s.next_round(r * 15 * MIN);
+        }
+        let start = 3 * 15 * MIN;
+        // Walked on with their group; two minutes in, they haven't shown.
+        let absent = s.session.courts[0][0].unwrap();
+        let waited = s.session.present[&absent].waiting_ms(start);
+        s.move_player(absent, Target::Pool, start + 2 * MIN);
+        assert_eq!(s.waiting_ms(absent, start + 2 * MIN), waited + 2 * MIN);
+        // Their replacement, from Up next, plays to Next round: that counts.
+        let sub = s.session.deck[1][0].unwrap();
+        s.move_player(sub, Target::Slot(Spot::Court(0, 0)), start + 3 * MIN);
+        s.next_round(start + 15 * MIN);
+        assert_eq!(s.session.present[&sub].last_played_ms, Some(start + 15 * MIN));
+    }
+
+    #[test]
+    fn time_up_ends_the_games_and_next_round_does_not_again() {
+        let (mut s, ids) = setup(&[Skill::Intermediate; 10], 2);
+        s.settings.auto_start_timer = true;
+        let round = s.settings.round_ms();
+        s.next_round(MIN);
+        let on: Vec<PlayerId> = s.session.courts.iter().flatten().flatten().copied().collect();
+        let end = MIN + round;
+        assert!(!s.close_round_if_time_up(end - 1000));
+        // Noticed a little after zero: the games end at zero.
+        assert!(s.close_round_if_time_up(end + 2000));
+        assert!(!s.close_round_if_time_up(end + 3000), "only once");
+        assert_eq!(s.session.games.len(), 2);
+        assert!(s.session.games.iter().all(|g| g.ended_ms == end));
+        for id in &on {
+            assert_eq!(s.session.present[id].last_played_ms, Some(end));
+            assert_eq!(s.session.present[id].games_tonight, 1);
+        }
+        // Taken off after time's up: the game still counts.
+        s.move_player(on[0], Target::Pool, end + MIN);
+        assert_eq!(s.session.present[&on[0]].games_tonight, 1);
+
+        // Next round three minutes later: nothing logged again, waits from zero.
+        s.next_round(end + 3 * MIN);
+        assert_eq!(s.session.games.len(), 2);
+        for id in &on {
+            assert_eq!(s.session.present[id].last_played_ms, Some(end), "{id}");
+        }
+        // Ten players, two courts: one court kept playing; that's a new game.
+        let kept: Vec<PlayerId> = s.session.courts.iter().flatten().flatten().copied().filter(|id| on.contains(id)).collect();
+        for id in &kept {
+            assert_eq!(s.session.present[id].games_tonight, 2);
+        }
+        let _ = ids;
+
+        // Next round before zero: it ends the games that change over, then
+        // (a court kept on plays on, and is logged when it changes over).
+        let t = end + 5 * MIN;
+        s.next_round(t);
+        assert!(s.session.games.len() > 2);
+        assert!(s.session.games[2..].iter().all(|g| g.ended_ms == t));
     }
 
     #[test]

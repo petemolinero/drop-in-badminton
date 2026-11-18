@@ -28,6 +28,9 @@ use crate::widgets::{self, ButtonKind, Help, clock, short_duration, unique};
 
 mod analytics_view;
 mod games_view;
+mod gate;
+mod password;
+pub use gate::Gate;
 mod groups;
 mod players_view;
 
@@ -188,6 +191,7 @@ pub struct DropInApp {
     /// The waiting list's order this frame (to bracket linked players).
     waiting_order: Vec<PlayerId>,
     practice_dialog: Option<groups::PracticeDialog>,
+    password_dialog: Option<password::PasswordDialog>,
     drag: Option<PlayerId>,
     drop_targets: Vec<(Rect, Target)>,
     anims: HashMap<PlayerId, ChipAnim>,
@@ -209,10 +213,14 @@ pub struct DropInApp {
 }
 
 impl DropInApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        cc.egui_ctx.set_fonts(theme::fonts());
-        widgets::load_skill_finishes(&cc.egui_ctx);
-        let (store, startup_error) = match Store::open_default() {
+    /// Open the app on the unprotected data file.
+    pub fn new(ctx: &egui::Context) -> Self {
+        Self::with_store(ctx, Store::open_default())
+    }
+
+    /// Open the app on a data file already opened (or that failed to open).
+    pub fn with_store(ctx: &egui::Context, store: rusqlite::Result<Store>) -> Self {
+        let (store, startup_error) = match store {
             Ok(store) => (store, None),
             Err(err) => {
                 eprintln!("drop-in-badminton: could not open database: {err}");
@@ -228,7 +236,7 @@ impl DropInApp {
         });
         let mut app = Self {
             state,
-            hall: Hall::load(&cc.egui_ctx),
+            hall: Hall::load(ctx),
             store,
             history: None,
             dirty: true,
@@ -260,6 +268,7 @@ impl DropInApp {
             link_dialog: None,
             waiting_order: Vec::new(),
             practice_dialog: None,
+            password_dialog: None,
             drag: None,
             drop_targets: Vec::new(),
             anims: HashMap::new(),
@@ -278,12 +287,12 @@ impl DropInApp {
         app.state.ensure_clock(wall);
         let now = app.state.now();
         app.state.sync_court_count(now);
-        app.stop_if_idle(&cc.egui_ctx, wall);
+        app.stop_if_idle(ctx, wall);
         let previous = app.store.swap_app_version(update::VERSION);
         if let Some(err) = startup_error {
-            app.toast(&cc.egui_ctx, err);
+            app.toast(ctx, err);
         } else if previous.is_some_and(|v| update::is_newer(update::VERSION, &v)) {
-            app.toast(&cc.egui_ctx, format!("Updated to version {}", update::VERSION));
+            app.toast(ctx, format!("Updated to version {}", update::VERSION));
         }
         if app.state.session.present.is_empty() {
             app.side_tab = SideTab::Roster;
@@ -603,11 +612,16 @@ impl eframe::App for DropInApp {
         self.wait_dialog_ui(&ctx, &pal);
         self.link_dialog_ui(&ctx, &pal);
         self.practice_dialog_ui(&ctx, &pal);
+        self.password_dialog_ui(&ctx, &pal);
         self.help_dialog(&ctx, &pal);
         if let Some((id, action)) = self.pending.take() {
             self.apply_player_action(&ctx, id, action);
         }
         self.stop_if_idle(&ctx, wall_ms());
+        // Time's up: the games on court end now, not at Next round.
+        if self.state.close_round_if_time_up(self.state.now()) {
+            self.dirty = true;
+        }
         self.session_form_ui(&ctx, &pal);
 
         if self.dirty {
@@ -719,6 +733,20 @@ impl DropInApp {
                     self.open_link_dialog(id);
                 }
             }
+            if show.contains("onecourt") {
+                self.state.settings.courts = 1;
+                let now = self.state.now();
+                self.state.sync_court_count(now);
+            }
+            if show.contains("setpassword") {
+                let mut d = password::PasswordDialog::new(password::Mode::Set);
+                d.debug_fill("court-time-2026", "court-time-202");
+                self.password_dialog = Some(d);
+            }
+            if show.contains("lockit") {
+                // Only ever on a scratch copy (screenshots use their own data folder).
+                let _ = self.store.set_password("court-time-2026");
+            }
             if show.contains("practicedialog") {
                 self.open_practice_dialog();
             }
@@ -792,22 +820,28 @@ impl DropInApp {
         let settle = if show.contains("menu") { self.frame > 12 && !gliding } else { (self.snackbar.is_none() || t > 9.0) && !gliding };
         let settle = settle && self.frame > 5 && (self.view != View::Dashboard || self.hall.settled(t));
         if !self.shot_requested && t > 1.5 && settle {
-            let ctx2 = ctx.clone();
-            let cb = egui::ScreenshotCallback::new(move |img| {
-                let [w, h] = img.size;
-                let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
-                for px in &img.pixels {
-                    out.extend_from_slice(&[px.r(), px.g(), px.b()]);
-                }
-                std::fs::write(&path, out).expect("write screenshot");
-                ctx2.send_viewport_cmd(egui::ViewportCommand::Close);
-                ctx2.request_repaint();
-            });
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(cb));
+            capture_screenshot(ctx, path);
             self.shot_requested = true;
         }
         ctx.request_repaint();
     }
+}
+
+/// Save this frame to `path` (as a PPM image), then close the window.
+#[cfg(debug_assertions)]
+fn capture_screenshot(ctx: &egui::Context, path: String) {
+    let ctx2 = ctx.clone();
+    let cb = egui::ScreenshotCallback::new(move |img| {
+        let [w, h] = img.size;
+        let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+        for px in &img.pixels {
+            out.extend_from_slice(&[px.r(), px.g(), px.b()]);
+        }
+        std::fs::write(&path, out).expect("write screenshot");
+        ctx2.send_viewport_cmd(egui::ViewportCommand::Close);
+        ctx2.request_repaint();
+    });
+    ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(cb));
 }
 
 // ===========================================================================
@@ -1815,10 +1849,18 @@ impl DropInApp {
             );
         }
 
-        let waiting = self.state.waiting_list(now);
-        let (active, resting): (Vec<PlayerId>, Vec<PlayerId>) = waiting
-            .into_iter()
-            .partition(|id| !self.state.session.present[id].resting);
+        // Who goes on when: one group per round, then anyone who can't be
+        // placed yet, then anyone on a break.
+        let line = self.state.waiting_line(now);
+        let mut section: HashMap<PlayerId, usize> = HashMap::new();
+        for (g, ids) in line.groups.iter().enumerate() {
+            section.extend(ids.iter().map(|id| (*id, g)));
+        }
+        let (stuck_at, resting_at) = (line.groups.len(), line.groups.len() + 1);
+        section.extend(line.stuck.iter().map(|id| (*id, stuck_at)));
+        section.extend(line.resting.iter().map(|id| (*id, resting_at)));
+        let active: Vec<PlayerId> = line.groups.iter().flatten().chain(&line.stuck).copied().collect();
+        let resting = line.resting;
 
         ui.label(RichText::new("Longest since last game first").font(regular(14.0)).color(pal.fg3));
         ui.add_space(6.0);
@@ -1867,14 +1909,20 @@ impl DropInApp {
             .collect();
         // Rows get as tall as the pane allows (up to 50) and shrink, down to a
         // readable 30, so the whole queue fits on screen before it has to scroll.
+        // A small labelled divider wherever one group ends and the next begins.
+        const DIVIDER_H: f32 = 22.0;
+        let divider_before = |k: usize| k > 0 && section.get(&all[k].0) != section.get(&all[k - 1].0);
+        let dividers = (0..all.len()).filter(|k| divider_before(*k)).count();
         let footer = 32.0;
-        let room = ui.available_height() - footer;
+        let room = ui.available_height() - footer - dividers as f32 * DIVIDER_H;
         const ROW_MAX: f32 = 50.0;
         const ROW_MIN: f32 = 30.0;
         let row = (room / all.len().max(1) as f32).floor().clamp(ROW_MIN, ROW_MAX);
         let fits_all = row * all.len() as f32 <= room;
         let footer = if fits_all { 0.0 } else { footer };
-        let list_h = if fits_all { room + 30.0 } else { ((room / row).floor() * row).max(row) };
+        // When it scrolls, the list takes all the room there is (dividers
+        // far down the line don't need space saved for them).
+        let list_h = if fits_all { room + dividers as f32 * DIVIDER_H + 30.0 } else { (ui.available_height() - footer).max(row) };
         #[allow(non_snake_case)]
         let ROW = row;
         let (list, _) = ui.allocate_exact_size(vec2(ui.available_width(), list_h), Sense::hover());
@@ -1898,6 +1946,22 @@ impl DropInApp {
             });
         }
         for (k, (id, rank)) in all.iter().enumerate() {
+            if divider_before(k) {
+                let label = match section.get(id).copied().unwrap_or(0) {
+                    g if g == resting_at => "On a break".to_owned(),
+                    g if g == stuck_at => "Can't be placed yet".to_owned(),
+                    1 => "1 round later".to_owned(),
+                    g => format!("{g} rounds later"),
+                };
+                let (r, _) = lui.allocate_exact_size(vec2(lui.available_width(), DIVIDER_H), Sense::hover());
+                let p = lui.painter();
+                let text = p.layout_no_wrap(label, semibold(11.5), pal.fg3);
+                let cy = r.center().y;
+                let tx = r.left() + 8.0;
+                p.hline(r.left()..=(tx - 4.0), cy, Stroke::new(1.0, pal.stroke1));
+                p.hline((tx + text.size().x + 6.0)..=r.right(), cy, Stroke::new(1.0, pal.stroke1));
+                p.galley(pos2(tx + 1.0, cy - text.size().y / 2.0), text, pal.fg3);
+            }
             if k % 2 == 1 {
                 let r = Rect::from_min_size(lui.cursor().min, vec2(lui.available_width(), ROW));
                 lui.painter().rect_filled(r, CornerRadius::same(6), pal.bg2.gamma_multiply(0.7));
@@ -2503,6 +2567,11 @@ impl DropInApp {
                         s.ui_scale = pct as f32 / 100.0;
                     }
                 });
+
+                widgets::hdivider(ui, pal);
+                widgets::section_label(ui, pal, "Security");
+                self.password_setting(ui, pal);
+                ui.add_space(6.0);
 
                 widgets::hdivider(ui, pal);
                 self.about_row(ui, pal);
@@ -3127,7 +3196,7 @@ impl DropInApp {
                 next.into(),
                 "Drag a name to swap players or move them; drop on Waiting to take someone off.".into(),
                 "The time under a name is since they last played — 0m while they're on court.".into(),
-                "Taken off before the round ends? They keep their earlier wait and the game doesn't count.".into(),
+                "Taken off a court before time's up (or Next round)? They keep their earlier wait and the game doesn't count.".into(),
                 "Right-click anyone, anywhere: send to waiting, break, check out, skill, rename, delete.".into(),
                 "Keys: Space starts or pauses, N is Next round, Ctrl+Z undoes, F11 is full screen.".into(),
             ],
@@ -3503,7 +3572,11 @@ fn prune_backups(dir: &std::path::Path, keep: usize) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let mut files: Vec<_> = entries
         .flatten()
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".db"))
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            // Locked data set aside after a lost password is never pruned.
+            (name.ends_with(".db") || name.ends_with(".db.enc")) && !name.starts_with("locked-")
+        })
         .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
         .collect();
     files.sort();

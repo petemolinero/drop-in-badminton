@@ -14,6 +14,7 @@ mod store;
 mod surfaces;
 mod theme;
 mod update;
+mod vault;
 mod widgets;
 
 fn main() {
@@ -52,7 +53,7 @@ fn main() {
     let result = eframe::run_native(
         "Drop-in Badminton",
         options,
-        Box::new(|cc| Ok(Box::new(app::DropInApp::new(cc)))),
+        Box::new(|cc| Ok(Box::new(app::Gate::new(cc)))),
     );
     if let Err(err) = result {
         fail(&format!("couldn't start ({}): {err}", launch::chosen().map_or("default graphics".into(), |g| format!("{g:?}"))));

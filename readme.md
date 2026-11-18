@@ -46,6 +46,20 @@ The tabs in the title bar switch between four views:
 An older `state.json` is imported automatically on first run and renamed to
 `state.json.imported`.
 
+## Password
+
+**Settings → Security → Set a password…** protects the app on a shared computer.
+From then on the app opens on a sign-in screen, and its data (players, sessions,
+games, and the backups) is only ever written to disk encrypted: Argon2id
+stretches the password into a key, and XChaCha20-Poly1305 seals the database
+(`drop-in-badminton.db.enc` in the data folder). The readable database files are
+removed when a password is set.
+
+There's **no recovery**: a forgotten password means the data can't be opened by
+anyone. *Forgot the password?* on the sign-in screen can start over with an empty
+app, keeping the locked data in `backups/` in case the password turns up.
+**Change…** and **Remove…** need the current password.
+
 ## Playing in groups
 
 - **Plays together** (right-click a player → *Plays together with…*, or the

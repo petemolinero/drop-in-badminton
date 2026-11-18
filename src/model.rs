@@ -240,6 +240,11 @@ pub struct Session {
     /// Players a person pulled off deck by hand: they won't be auto-placed again
     /// until the next rotation, so the slot doesn't bounce straight back to them.
     pub skip_round: BTreeSet<PlayerId>,
+    /// When the timer last ran out (its end time), if the games on court then
+    /// were ended there and then: logged, and their players' waits restarted.
+    /// Games that began by then are over, even though their players are still
+    /// on court until Next round.
+    pub round_closed_ms: Option<i64>,
     /// Tonight's practice group (e.g. players preparing for a tournament):
     /// they only play each other, but share the courts fairly with everyone.
     pub practice: BTreeSet<PlayerId>,
@@ -268,6 +273,7 @@ impl Default for Session {
             deck: Vec::new(),
             skip_round: BTreeSet::new(),
             practice: BTreeSet::new(),
+            round_closed_ms: None,
             timer: Timer::Idle,
             round_number: 0,
             last_activity_ms: wall_ms(),
