@@ -75,6 +75,12 @@ pub struct Player {
     /// Games played across every night, for the roster's curiosity column.
     #[serde(default)]
     pub lifetime_games: u32,
+    /// How they heard about the club (a friend, Instagram, …).
+    #[serde(default)]
+    pub found_via: String,
+    /// Where they're from: a neighbourhood or town.
+    #[serde(default)]
+    pub from: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -390,6 +396,8 @@ impl AppState {
                 name: name.trim().to_string(),
                 skill,
                 lifetime_games: 0,
+                found_via: String::new(),
+                from: String::new(),
             },
         );
         id

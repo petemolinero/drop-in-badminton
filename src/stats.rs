@@ -14,6 +14,8 @@ const LONGEST_GAME_MS: i64 = 60 * 60_000;
 pub struct PlayerStats {
     pub name: String,
     pub skill: Option<Skill>,
+    pub found_via: String,
+    pub from: String,
     /// Sessions they checked in to.
     pub sessions: u32,
     pub games: u32,
@@ -64,7 +66,13 @@ impl Stats {
             .players
             .iter()
             .map(|p| {
-                let stats = PlayerStats { name: p.name.clone(), skill: Some(p.skill), ..Default::default() };
+                let stats = PlayerStats {
+                    name: p.name.clone(),
+                    skill: Some(p.skill),
+                    found_via: p.found_via.clone(),
+                    from: p.from.clone(),
+                    ..Default::default()
+                };
                 (p.id, stats)
             })
             .collect();
@@ -172,7 +180,7 @@ mod tests {
     use crate::store::{RawGame, RawPlayer};
 
     fn player(id: PlayerId, name: &str) -> RawPlayer {
-        RawPlayer { id, name: name.into(), skill: Skill::Intermediate, lifetime_games: 0 }
+        RawPlayer { id, name: name.into(), skill: Skill::Intermediate, lifetime_games: 0, found_via: String::new(), from: String::new() }
     }
 
     #[test]

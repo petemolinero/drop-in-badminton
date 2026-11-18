@@ -29,10 +29,10 @@ The tabs in the title bar switch between three views:
 
 - **Dashboard**: the courts, Up next, the timer and the waiting list.
 - **Players**: the player database: everyone, archived players included, as a
-  table, separate from any session. Edit names and skill levels in place; click
-  the status to archive a player or make them active again. Columns sort
-  when clicked, and show sessions, games, games per session, court time, usual
-  partner, and first and latest session.
+  table, separate from any session. Edit names, skill levels, where they're from
+  and how they found us in place; click the status to archive a player or make
+  them active again. Columns sort when clicked, and show sessions, games, games
+  per session, court time, usual partner, and first and latest session.
 - **Analytics**: totals (players, sessions, games, average turnout, how many came
   back, court time), turnout per session split into returning players and
   first-timers, the ten players with the most games, and the roster's skill mix.
@@ -42,8 +42,9 @@ An older `state.json` is imported automatically on first run and renamed to
 
 ## How a night works
 
-1. Open the **roster** (people icon). On a new week, press **New game day** first if it didn't start on its own. Toggle players in as they arrive, or add new
-   ones with a name and skill level.
+1. Open the **roster** (people icon). On a new week, press **New game day** first if it didn't start on its own. Toggle players in as they arrive. New
+   players go in the sidebar's **Add player** tab: name, skill level, where they're
+   from and how they found us (one tap for the usual answers).
 2. The **Up next** cards fill automatically from the waiting pool.
 3. Press **Next round** (or `N`): each Up next group goes onto its court, and the
    cards refill from the pool.

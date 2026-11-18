@@ -17,6 +17,8 @@ pub(super) enum Col {
     Name,
     Skill,
     Status,
+    From,
+    FoundVia,
     Sessions,
     Games,
     PerSession,
@@ -27,10 +29,12 @@ pub(super) enum Col {
 }
 
 impl Col {
-    const ALL: [Col; 10] = [
+    const ALL: [Col; 12] = [
         Col::Name,
         Col::Skill,
         Col::Status,
+        Col::From,
+        Col::FoundVia,
         Col::Sessions,
         Col::Games,
         Col::PerSession,
@@ -45,6 +49,8 @@ impl Col {
             Col::Name => "Name",
             Col::Skill => "Skill level",
             Col::Status => "Status",
+            Col::From => "From",
+            Col::FoundVia => "Found us via",
             Col::Sessions => "Sessions",
             Col::Games => "Games",
             Col::PerSession => "Games / session",
@@ -58,16 +64,18 @@ impl Col {
     /// Width at full size; the table shrinks every column evenly to fit.
     fn width(self) -> f32 {
         match self {
-            Col::Name => 230.0,
+            Col::Name => 220.0,
             Col::Skill => 160.0,
-            Col::Status => 140.0,
-            Col::Sessions => 100.0,
-            Col::Games => 84.0,
-            Col::PerSession => 136.0,
-            Col::CourtTime => 112.0,
-            Col::Partner => 190.0,
-            Col::First => 136.0,
-            Col::Last => 136.0,
+            Col::Status => 124.0,
+            Col::From => 150.0,
+            Col::FoundVia => 150.0,
+            Col::Sessions => 96.0,
+            Col::Games => 80.0,
+            Col::PerSession => 130.0,
+            Col::CourtTime => 106.0,
+            Col::Partner => 180.0,
+            Col::First => 126.0,
+            Col::Last => 126.0,
         }
     }
 
@@ -114,14 +122,41 @@ pub(super) struct PlayersView {
     /// Row order from the last frame, kept while a name is being typed so the
     /// row doesn't jump away mid-word.
     order: Vec<PlayerId>,
-    /// The name being edited and what it was before, to put back if left empty.
-    editing: Option<(PlayerId, String)>,
-    /// An archived player's name as it's typed (saved when the box is left).
-    archived_name: Option<(PlayerId, String)>,
+    /// The cell being edited and what it held before, to put a name back if
+    /// it's left empty.
+    editing: Option<(PlayerId, Field, String)>,
+    /// An archived player as they're being edited (saved when the box is left).
+    archived_edit: Option<Player>,
     /// A player just added from here: focus their name, and drop them again
     /// if it's left empty.
     added: Option<PlayerId>,
     focus: Option<PlayerId>,
+}
+
+/// The free-text columns.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Field {
+    Name,
+    From,
+    FoundVia,
+}
+
+impl Field {
+    fn get(self, p: &Player) -> &str {
+        match self {
+            Field::Name => &p.name,
+            Field::From => &p.from,
+            Field::FoundVia => &p.found_via,
+        }
+    }
+
+    fn set(self, p: &mut Player, value: String) {
+        match self {
+            Field::Name => p.name = value,
+            Field::From => p.from = value,
+            Field::FoundVia => p.found_via = value,
+        }
+    }
 }
 
 struct Row {
@@ -130,6 +165,8 @@ struct Row {
     skill: Skill,
     status: Status,
     stats: PlayerStats,
+    /// The player as stored (for the editable columns).
+    player: Player,
 }
 
 impl DropInApp {
@@ -198,7 +235,11 @@ impl DropInApp {
                 Filter::Active => r.status == Status::Active,
                 Filter::Archived => r.status == Status::Archived,
             })
-            .filter(|r| query.is_empty() || r.name.to_lowercase().contains(&query) || pv.added == Some(r.id))
+            .filter(|r| {
+                query.is_empty()
+                    || pv.added == Some(r.id)
+                    || [&r.name, &r.player.from, &r.player.found_via].iter().any(|s| s.to_lowercase().contains(&query))
+            })
             .map(|r| (r.id, r))
             .collect();
         let order: Vec<PlayerId> = if pv.editing.is_some() || pv.focus.is_some() {
@@ -263,16 +304,31 @@ impl DropInApp {
                 skill: p.skill,
                 status: Status::Active,
                 stats: stats.players.get(&p.id).cloned().unwrap_or_default(),
+                player: p.clone(),
             })
             .collect();
         for (id, s) in &stats.players {
             // Off the roster: archived, or just taken off and not saved yet.
             if !self.state.players.contains_key(id) && !s.name.is_empty() {
-                let name = match &self.players_view.archived_name {
-                    Some((x, name)) if x == id => name.clone(),
-                    _ => s.name.clone(),
+                let player = match &self.players_view.archived_edit {
+                    Some(p) if p.id == *id => p.clone(),
+                    _ => Player {
+                        id: *id,
+                        name: s.name.clone(),
+                        skill: s.skill.unwrap_or(Skill::Intermediate),
+                        lifetime_games: s.games,
+                        found_via: s.found_via.clone(),
+                        from: s.from.clone(),
+                    },
                 };
-                rows.push(Row { id: *id, name, skill: s.skill.unwrap_or(Skill::Intermediate), status: Status::Archived, stats: s.clone() });
+                rows.push(Row {
+                    id: *id,
+                    name: player.name.clone(),
+                    skill: player.skill,
+                    status: Status::Archived,
+                    stats: s.clone(),
+                    player,
+                });
             }
         }
         rows
@@ -344,9 +400,11 @@ impl DropInApp {
             };
             let none = || "—".to_owned();
             match col {
-                Col::Name => self.name_cell(ui, pal, row, cell),
+                Col::Name => self.text_cell(ui, pal, row, cell, Field::Name),
                 Col::Skill => self.skill_cell(ui, pal, row, cell),
                 Col::Status => self.status_cell(ui, pal, row, cell),
+                Col::From => self.text_cell(ui, pal, row, cell, Field::From),
+                Col::FoundVia => self.text_cell(ui, pal, row, cell, Field::FoundVia),
                 Col::Sessions => text(if s.sessions > 0 { s.sessions.to_string() } else { none() }, ink),
                 Col::Games => text(if s.games > 0 { s.games.to_string() } else { none() }, ink),
                 Col::PerSession => text(if s.sessions > 0 { format!("{:.1}", s.games_per_session()) } else { none() }, ink),
@@ -370,21 +428,21 @@ impl DropInApp {
         }
     }
 
-    /// The name, edited in place like a spreadsheet cell.
-    fn name_cell(&mut self, ui: &mut Ui, pal: &Palette, row: &Row, cell: Rect) {
+    /// A text column, edited in place like a spreadsheet cell.
+    fn text_cell(&mut self, ui: &mut Ui, pal: &Palette, row: &Row, cell: Rect, field: Field) {
         let id = row.id;
-        let mut buf = row.name.clone();
+        let mut buf = field.get(&row.player).to_owned();
         let edit = egui::TextEdit::singleline(&mut buf)
-            .id(unique(("pv-name", id)))
+            .id(unique(("pv-text", id, field)))
             // The frame's margin is the text's padding; this centres it in the row.
             .frame(Frame::NONE.inner_margin(Margin { left: 6, right: 6, top: 4, bottom: 6 }))
             .font(regular(15.0))
             .text_color(if row.status == Status::Archived { pal.fg2 } else { pal.fg1 })
-            .hint_text("Type a name")
+            .hint_text(if field == Field::Name { "Type a name" } else { "—" })
             .desired_width(f32::INFINITY);
         let area = Rect::from_center_size(cell.center(), vec2(cell.width() - 12.0, 30.0));
         let resp = ui.put(area, edit);
-        if self.players_view.focus == Some(id) {
+        if field == Field::Name && self.players_view.focus == Some(id) {
             resp.request_focus();
             self.players_view.focus = None;
         }
@@ -395,41 +453,47 @@ impl DropInApp {
             p.rect_stroke(area, CornerRadius::same(4), Stroke::new(1.0, pal.stroke1), StrokeKind::Inside);
         }
         if resp.gained_focus() {
-            self.players_view.editing = Some((id, row.name.clone()));
+            self.players_view.editing = Some((id, field, field.get(&row.player).to_owned()));
         }
         if resp.changed() {
             if row.status == Status::Archived {
-                self.players_view.archived_name = Some((id, buf.clone()));
+                let mut edited = row.player.clone();
+                field.set(&mut edited, buf.clone());
+                self.players_view.archived_edit = Some(edited);
             } else if let Some(p) = self.state.players.get_mut(&id) {
-                p.name = buf.clone();
+                field.set(p, buf.clone());
                 self.dirty = true;
             }
         }
         if resp.lost_focus() {
-            self.finish_name_edit(id, &buf, row.skill);
+            self.finish_edit(id, field, &buf);
         }
     }
 
-    /// Leaving a name box: tidy the name, put back a blanked one, or drop a
-    /// player who was added but never named.
-    fn finish_name_edit(&mut self, id: PlayerId, typed: &str, skill: Skill) {
+    /// Leaving a text box: tidy what was typed, put back a blanked name, or
+    /// drop a player who was added but never named.
+    fn finish_edit(&mut self, id: PlayerId, field: Field, typed: &str) {
         let pv = &mut self.players_view;
-        let before = pv.editing.take().filter(|(x, _)| *x == id).map(|(_, name)| name);
-        let name = typed.trim().to_owned();
-        let added = pv.added == Some(id);
-        pv.added = None;
-        if let Some((x, _)) = pv.archived_name.take().filter(|(x, _)| *x == id) {
-            if !name.is_empty() {
-                if let Err(err) = self.store.update_archived_player(x, &name, skill) {
-                    eprintln!("drop-in-badminton: couldn't rename: {err}");
-                }
-                self.save_gen += 1;
+        let before = pv.editing.take().filter(|(x, f, _)| *x == id && *f == field).map(|(_, _, v)| v);
+        let value = typed.trim().to_owned();
+        let added = field == Field::Name && pv.added == Some(id);
+        if field == Field::Name {
+            pv.added = None;
+        }
+        if let Some(mut edited) = pv.archived_edit.take().filter(|p| p.id == id) {
+            if field == Field::Name && value.is_empty() {
+                return; // a name can't be blank: keep the stored one
             }
+            field.set(&mut edited, value);
+            if let Err(err) = self.store.update_archived_player(&edited) {
+                eprintln!("drop-in-badminton: couldn't save {}: {err}", edited.name);
+            }
+            self.save_gen += 1;
             return;
         }
         let Some(p) = self.state.players.get_mut(&id) else { return };
-        if !name.is_empty() {
-            p.name = name;
+        if field != Field::Name || !value.is_empty() {
+            field.set(p, value);
         } else if added {
             self.state.players.remove(&id);
         } else if let Some(before) = before {
@@ -458,7 +522,8 @@ impl DropInApp {
         });
         let Some(skill) = chosen.filter(|s| *s != row.skill) else { return };
         if row.status == Status::Archived {
-            if let Err(err) = self.store.update_archived_player(id, &row.name, skill) {
+            let edited = Player { skill, ..row.player.clone() };
+            if let Err(err) = self.store.update_archived_player(&edited) {
                 eprintln!("drop-in-badminton: couldn't change level: {err}");
             }
             self.save_gen += 1;
@@ -510,7 +575,7 @@ impl DropInApp {
         let now = self.state.now();
         match action {
             Some("restore") => {
-                let player = Player { id, name: name.clone(), skill: row.skill, lifetime_games: row.stats.games };
+                let player = row.player.clone();
                 self.act(&ctx, format!("{name} is active again"), |s| {
                     s.players.insert(id, player);
                 });
@@ -527,6 +592,8 @@ fn compare(col: Col, a: &Row, b: &Row) -> std::cmp::Ordering {
         Col::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
         Col::Skill => a.skill.rank().cmp(&b.skill.rank()),
         Col::Status => (a.status as u8).cmp(&(b.status as u8)),
+        Col::From => a.player.from.to_lowercase().cmp(&b.player.from.to_lowercase()),
+        Col::FoundVia => a.player.found_via.to_lowercase().cmp(&b.player.found_via.to_lowercase()),
         Col::Sessions => x.sessions.cmp(&y.sessions),
         Col::Games => x.games.cmp(&y.games),
         Col::PerSession => x.games_per_session().total_cmp(&y.games_per_session()),

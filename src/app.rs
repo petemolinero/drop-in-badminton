@@ -29,6 +29,14 @@ use crate::widgets::{self, ButtonKind, Help, clock, short_duration, unique};
 mod analytics_view;
 mod players_view;
 
+/// The dashboard sidebar's tabs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SideTab {
+    Waiting,
+    Roster,
+    AddPlayer,
+}
+
 /// The app's top-level screens, picked from the title bar.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum View {
@@ -135,12 +143,14 @@ pub struct DropInApp {
     history: Option<HistoryView>,
     dirty: bool,
     dirty_since: Option<f64>,
-    roster_open: bool,
+    side_tab: SideTab,
     settings_open: bool,
     /// Show a plain-language explanation at the top of each section.
     help: bool,
     new_name: String,
     new_skill: Skill,
+    new_from: String,
+    new_found_via: String,
     search: String,
     /// Filter for the waiting list.
     waiting_search: String,
@@ -211,11 +221,13 @@ impl DropInApp {
             history: None,
             dirty: true,
             dirty_since: None,
-            roster_open: false,
+            side_tab: SideTab::Waiting,
             settings_open: false,
             help: false,
             new_name: String::new(),
             new_skill: Skill::Intermediate,
+            new_from: String::new(),
+            new_found_via: String::new(),
             search: String::new(),
             waiting_search: String::new(),
             time_edit: String::new(),
@@ -256,7 +268,9 @@ impl DropInApp {
         } else if previous.is_some_and(|v| update::is_newer(update::VERSION, &v)) {
             app.toast(&cc.egui_ctx, format!("Updated to version {}", update::VERSION));
         }
-        app.roster_open = app.state.session.present.is_empty();
+        if app.state.session.present.is_empty() {
+            app.side_tab = SideTab::Roster;
+        }
         app
     }
 
@@ -330,7 +344,7 @@ impl DropInApp {
         self.state.new_day(start_ms, wall_ms());
         self.save();
         self.dirty = false;
-        self.roster_open = true;
+        self.side_tab = SideTab::Roster;
         self.snackbar = Some(Snackbar {
             text: format!("New session · {} — check players in as they arrive", fmt_date(start_ms, "%a, %b %-d, %-I:%M %p")),
             undo: Some(before),
@@ -513,12 +527,14 @@ impl eframe::App for DropInApp {
                         ui.set_min_size(avail);
                         ui.set_max_width(avail.x);
                         self.side_tabs(ui, &pal, now);
-                        if self.roster_open {
-                            // Players dragged off a court can still be dropped here.
-                            self.drop_targets.push((ui.max_rect().expand(16.0), Target::Pool));
-                            self.roster(ui, &pal, now);
-                        } else {
-                            self.pool(ui, &pal, now);
+                        match self.side_tab {
+                            SideTab::Waiting => self.pool(ui, &pal, now),
+                            SideTab::Roster => {
+                                // Players dragged off a court can still be dropped here.
+                                self.drop_targets.push((ui.max_rect().expand(16.0), Target::Pool));
+                                self.roster(ui, &pal, now);
+                            }
+                            SideTab::AddPlayer => self.add_player_form(ui, &pal, now),
                         }
                     });
                 });
@@ -618,7 +634,12 @@ impl DropInApp {
         let show = std::env::var("DROP_IN_BADMINTON_SHOW").unwrap_or_default();
         if self.frame == 2 {
             self.settings_open = show.contains("settings");
-            self.roster_open = show.contains("roster");
+            if show.contains("roster") {
+                self.side_tab = SideTab::Roster;
+            }
+            if show.contains("addplayer") {
+                self.side_tab = SideTab::AddPlayer;
+            }
             self.help = show.contains("help");
             if show.contains("update") {
                 self.updater.debug_set(UpdateStatus::Available(Release {
@@ -762,8 +783,8 @@ impl DropInApp {
                 self.settings_open = false;
             } else if self.confirm.is_some() {
                 self.confirm = None;
-            } else if self.roster_open {
-                self.roster_open = false;
+            } else if self.side_tab != SideTab::Waiting {
+                self.side_tab = SideTab::Waiting;
             }
         }
     }
@@ -1623,31 +1644,42 @@ impl DropInApp {
     /// The right panel's tabs: the waiting list, or the roster for check-in.
     fn side_tabs(&mut self, ui: &mut Ui, pal: &Palette, now: i64) {
         let waiting = self.state.waiting_list(now).iter().filter(|id| !self.state.session.present[id].resting).count();
-        let tabs = [(false, "Waiting", waiting), (true, "Roster", self.state.session.present.len())];
+        let tabs = [
+            (SideTab::Waiting, "Waiting", Some(waiting)),
+            (SideTab::Roster, "Roster", Some(self.state.session.present.len())),
+            (SideTab::AddPlayer, "Add player", None),
+        ];
         let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::hover());
         ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, pal.stroke2));
         let mut x = bar.left();
-        for (roster, label, count) in tabs {
+        for (tab, label, count) in tabs {
             let p = ui.painter();
-            let selected = self.roster_open == roster;
+            let selected = self.side_tab == tab;
             let text = p.layout_no_wrap(label.to_owned(), semibold(20.0), pal.fg1);
-            let badge_w = p.layout_no_wrap(count.to_string(), semibold(13.0), pal.fg1).size().x + 13.0 * 1.1;
-            let w = text.size().x + 8.0 + badge_w + 20.0;
+            // "Add player" leads with a + instead of trailing a count.
+            let lead = if count.is_none() { 24.0 } else { 0.0 };
+            let badge_w = count.map_or(0.0, |n| p.layout_no_wrap(n.to_string(), semibold(13.0), pal.fg1).size().x + 13.0 * 1.1 + 8.0);
+            let w = lead + text.size().x + badge_w + 20.0;
             let rect = Rect::from_min_size(pos2(x, bar.top()), vec2(w, bar.height()));
             let resp = ui.interact(rect, unique(("side-tab", label)), Sense::click());
             let ink = if selected { pal.fg1 } else if resp.hovered() { pal.fg2 } else { pal.fg3 };
             let p = ui.painter();
-            let text_pos = pos2(rect.left() + 10.0, rect.center().y - text.size().y / 2.0 - 2.0);
+            if lead > 0.0 {
+                p.text(pos2(rect.left() + 20.0, rect.center().y - 1.0), Align2::CENTER_CENTER, icon::PERSON_ADD, icon_font(20.0), if selected { pal.brand_fg } else { ink });
+            }
+            let text_pos = pos2(rect.left() + 10.0 + lead, rect.center().y - text.size().y / 2.0 - 2.0);
             let text_right = text_pos.x + text.size().x;
             p.galley_with_override_text_color(text_pos, text, ink);
             let (bg, fg) = if selected { (pal.brand_subtle, pal.on_brand_subtle) } else { (pal.subtle_selected, pal.fg3) };
-            widgets::paint_badge(p, pos2(text_right + 8.0, rect.center().y - 2.0), Align2::LEFT_CENTER, None, &count.to_string(), 13.0, bg, fg);
+            if let Some(n) = count {
+                widgets::paint_badge(p, pos2(text_right + 8.0, rect.center().y - 2.0), Align2::LEFT_CENTER, None, &n.to_string(), 13.0, bg, fg);
+            }
             if selected {
                 let line = Rect::from_min_max(pos2(rect.left() + 8.0, bar.bottom() - 3.0), pos2(rect.right() - 8.0, bar.bottom()));
                 p.rect_filled(line, CornerRadius::same(2), pal.brand_fg);
             }
             if resp.clicked() {
-                self.roster_open = roster;
+                self.side_tab = tab;
             }
             x = rect.right() + 4.0;
         }
@@ -1691,7 +1723,7 @@ impl DropInApp {
                 );
                 ui.add_space(8.0);
                 if widgets::button(ui, pal, ButtonKind::Primary, Some(icon::GROUP), "Open roster", 40.0).clicked() {
-                    self.roster_open = true;
+                    self.side_tab = SideTab::Roster;
                 }
             });
             return;
@@ -1911,71 +1943,123 @@ impl DropInApp {
 // Roster pane
 
 impl DropInApp {
-    fn roster(&mut self, ui: &mut Ui, pal: &Palette, now: i64) {
+    /// The sidebar's Add player tab: a new player's details, then add them
+    /// (checked in, or just to the roster).
+    fn add_player_form(&mut self, ui: &mut Ui, pal: &Palette, now: i64) {
         let ctx = ui.ctx().clone();
+        ui.label(RichText::new("New to the club? Add them here.").font(regular(14.0)).color(pal.fg3));
+        ui.add_space(10.0);
+        let field = |ui: &mut Ui, label: &str| {
+            ui.label(RichText::new(label).font(semibold(14.0)).color(pal.fg2));
+            ui.add_space(2.0);
+        };
+        fn text<'a>(text: &'a mut String, hint: &str) -> egui::TextEdit<'a> {
+            egui::TextEdit::singleline(text)
+                .hint_text(hint.to_owned())
+                .font(regular(16.0))
+                .margin(Margin::symmetric(10, 7))
+                .desired_width(f32::INFINITY)
+        }
+        let mut entered = false;
+        field(ui, "Name");
+        let name_box = ui.add(text(&mut self.new_name, "First and last name"));
+        entered |= name_box.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+        ui.add_space(12.0);
+
+        field(ui, "Skill level");
+        // A 2 × 2 choice of equal-width options.
+        let w = (ui.available_width() - 6.0) / 2.0;
+        for pair in Skill::ALL.chunks(2) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                for &skill in pair {
+                    if widgets::skill_option(ui, pal, skill, self.new_skill == skill, w).clicked() {
+                        self.new_skill = skill;
+                    }
+                }
+            });
+        }
+        ui.add_space(12.0);
+
+        field(ui, "Where are they from?");
+        let from_box = ui.add(text(&mut self.new_from, "Neighbourhood or town"));
+        entered |= from_box.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+        ui.add_space(12.0);
+
+        field(ui, "How did they find us?");
+        let via_box = ui.add(text(&mut self.new_found_via, "Type, or pick one below"));
+        entered |= via_box.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+        ui.add_space(6.0);
+        // The usual answers, one tap each.
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+            for choice in ["A friend", "Instagram", "Facebook", "Meetup", "Google", "Walked by"] {
+                let picked = self.new_found_via.trim().eq_ignore_ascii_case(choice);
+                let fill = if picked { pal.brand_subtle } else { pal.bg1 };
+                let ink = if picked { pal.on_brand_subtle } else { pal.fg2 };
+                let chip = egui::Button::new(RichText::new(choice).font(regular(14.0)).color(ink))
+                    .fill(fill)
+                    .stroke(Stroke::new(1.0, if picked { pal.brand_fg } else { pal.stroke1 }))
+                    .corner_radius(14)
+                    .min_size(vec2(0.0, 28.0));
+                if ui.add(chip).on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                    self.new_found_via = if picked { String::new() } else { choice.to_owned() };
+                }
+            }
+        });
+        ui.add_space(16.0);
+
+        let (check_in, roster_only) = ui
+            .with_layout(Layout::top_down_justified(Align::Min), |ui| {
+                let a = widgets::button(ui, pal, ButtonKind::Primary, Some(icon::PERSON_ADD), "Add & check in", 40.0).clicked();
+                ui.add_space(2.0);
+                let b = widgets::button(ui, pal, ButtonKind::Secondary, None, "Add to the roster only", 36.0).clicked();
+                (a, b)
+            })
+            .inner;
+        if !(entered || check_in || roster_only) {
+            return;
+        }
+        let name = self.new_name.trim().to_owned();
+        if name.is_empty() {
+            // Always looks ready; with no name yet it just puts you in the name box.
+            name_box.request_focus();
+            return;
+        }
+        let (from, found_via) = (self.new_from.trim().to_owned(), self.new_found_via.trim().to_owned());
+        let exists = self.state.players.values().find(|p| p.name.eq_ignore_ascii_case(&name)).map(|p| p.id);
+        let id = exists.unwrap_or_else(|| self.state.add_player(&name, self.new_skill));
+        if let Some(p) = self.state.players.get_mut(&id) {
+            // Fill in what we didn't know about someone already on the roster.
+            if p.from.is_empty() {
+                p.from = from;
+            }
+            if p.found_via.is_empty() {
+                p.found_via = found_via;
+            }
+        }
+        let checking_in = !roster_only;
+        if checking_in {
+            self.state.check_in(id, now);
+        }
+        self.dirty = true;
+        self.new_name.clear();
+        self.new_from.clear();
+        self.new_found_via.clear();
+        let message = match (exists.is_some(), checking_in) {
+            (true, true) => format!("{name} is already on the roster — checked in"),
+            (true, false) => format!("{name} is already on the roster"),
+            (false, true) => format!("{name} added and checked in"),
+            (false, false) => format!("{name} added to the roster"),
+        };
+        self.toast(&ctx, message);
+        name_box.request_focus();
+    }
+
+    fn roster(&mut self, ui: &mut Ui, pal: &Palette, now: i64) {
         let extra = format!("{} checked in · {} players", self.state.session.present.len(), self.state.players.len());
         ui.label(RichText::new(extra).font(regular(14.0)).color(pal.fg3));
         ui.add_space(6.0);
-
-        // --- Add a player ---
-        Frame::NONE
-            .fill(pal.bg2)
-            .stroke(Stroke::new(1.0, pal.stroke2))
-            .corner_radius(6)
-            .inner_margin(Margin::same(12))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                widgets::section_label(ui, pal, "Add a player");
-                let edit = egui::TextEdit::singleline(&mut self.new_name)
-                    .hint_text("Name")
-                    .font(regular(16.0))
-                    .margin(Margin::symmetric(10, 7))
-                    .desired_width(f32::INFINITY);
-                let resp = ui.add(edit);
-                let entered = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                // A 2 × 2 choice of equal-width options.
-                let w = (ui.available_width() - 6.0) / 2.0;
-                for pair in Skill::ALL.chunks(2) {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        for &skill in pair {
-                            if widgets::skill_option(ui, pal, skill, self.new_skill == skill, w).clicked() {
-                                self.new_skill = skill;
-                            }
-                        }
-                    });
-                }
-                ui.add_space(2.0);
-                let can_add = !self.new_name.trim().is_empty();
-                // Always looks ready; with no name yet it just puts you in the name box.
-                let add_clicked = ui
-                    .with_layout(Layout::top_down_justified(Align::Min), |ui| {
-                        widgets::button(ui, pal, ButtonKind::Primary, Some(icon::PERSON_ADD), "Add & check in", 36.0)
-                    })
-                    .inner
-                    .clicked();
-                if add_clicked && !can_add {
-                    resp.request_focus();
-                }
-                if (entered || add_clicked) && can_add {
-                    let name = self.new_name.trim().to_owned();
-                    let exists = self
-                        .state
-                        .players
-                        .values()
-                        .find(|p| p.name.eq_ignore_ascii_case(&name))
-                        .map(|p| p.id);
-                    let id = exists.unwrap_or_else(|| self.state.add_player(&name, self.new_skill));
-                    self.state.check_in(id, now);
-                    self.dirty = true;
-                    self.new_name.clear();
-                    if exists.is_some() {
-                        self.toast(&ctx, format!("{name} is already on the roster — checked in"));
-                    }
-                    resp.request_focus();
-                }
-            });
-        ui.add_space(4.0);
 
         // --- Search ---
         ui.add(
@@ -2023,7 +2107,7 @@ impl DropInApp {
                     ui.add_space(20.0);
                     ui.label(
                         RichText::new(if self.state.players.is_empty() {
-                            "Your roster is empty. Add the first player above."
+                            "Your roster is empty. Add the first player from the Add player tab."
                         } else {
                             "No matches."
                         })

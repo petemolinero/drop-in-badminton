@@ -27,7 +27,9 @@ CREATE TABLE IF NOT EXISTS players (
     name           TEXT    NOT NULL,
     skill          TEXT    NOT NULL,
     lifetime_games INTEGER NOT NULL DEFAULT 0,
-    archived       INTEGER NOT NULL DEFAULT 0
+    archived       INTEGER NOT NULL DEFAULT 0,
+    found_via      TEXT    NOT NULL DEFAULT '',
+    home           TEXT    NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -101,6 +103,8 @@ pub struct RawPlayer {
     pub name: String,
     pub skill: Skill,
     pub lifetime_games: u32,
+    pub found_via: String,
+    pub from: String,
 }
 
 #[derive(Clone, Debug)]
@@ -184,6 +188,19 @@ impl Store {
         // WAL keeps writes cheap and crash-safe.
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
         conn.execute_batch(SCHEMA)?;
+        // Columns added since the first release.
+        let columns: Vec<String> = {
+            let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('players')")?;
+            stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?
+        };
+        for (column, ddl) in [
+            ("found_via", "ALTER TABLE players ADD COLUMN found_via TEXT NOT NULL DEFAULT ''"),
+            ("home", "ALTER TABLE players ADD COLUMN home TEXT NOT NULL DEFAULT ''"),
+        ] {
+            if !columns.iter().any(|c| c == column) {
+                conn.execute_batch(ddl)?;
+            }
+        }
         Ok(Self { conn })
     }
 
@@ -256,7 +273,7 @@ impl Store {
             }
         }
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, skill, lifetime_games FROM players WHERE archived = 0",
+            "SELECT id, name, skill, lifetime_games, found_via, home FROM players WHERE archived = 0",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(Player {
@@ -264,6 +281,8 @@ impl Store {
                 name: r.get(1)?,
                 skill: skill_from_str(&r.get::<_, String>(2)?),
                 lifetime_games: r.get(3)?,
+                found_via: r.get(4)?,
+                from: r.get(5)?,
             })
         })?;
         for p in rows {
@@ -300,13 +319,14 @@ impl Store {
 
     fn save_players(tx: &Transaction, players: &BTreeMap<PlayerId, Player>) -> rusqlite::Result<()> {
         let mut upsert = tx.prepare_cached(
-            "INSERT INTO players(id, name, skill, lifetime_games, archived) VALUES (?1, ?2, ?3, ?4, 0)
+            "INSERT INTO players(id, name, skill, lifetime_games, archived, found_via, home) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)
              ON CONFLICT(id) DO UPDATE SET name = excluded.name, skill = excluded.skill,
-                 lifetime_games = excluded.lifetime_games, archived = 0",
+                 lifetime_games = excluded.lifetime_games, archived = 0,
+                 found_via = excluded.found_via, home = excluded.home",
         )?;
         // A player added from the Players view is only kept once they have a name.
         for p in players.values().filter(|p| !p.name.trim().is_empty()) {
-            upsert.execute(params![p.id as i64, p.name, skill_to_str(p.skill), p.lifetime_games])?;
+            upsert.execute(params![p.id as i64, p.name, skill_to_str(p.skill), p.lifetime_games, p.found_via.trim(), p.from.trim()])?;
         }
         // Anyone no longer on the roster is archived, keeping their history.
         let ids: Vec<i64> = {
@@ -394,7 +414,7 @@ impl Store {
     /// player ever (archived ones too) and every session's attendance and games.
     pub fn everything(&self) -> rusqlite::Result<RawHistory> {
         let mut h = RawHistory::default();
-        let mut stmt = self.conn.prepare("SELECT id, name, skill, lifetime_games FROM players")?;
+        let mut stmt = self.conn.prepare("SELECT id, name, skill, lifetime_games, found_via, home FROM players")?;
         h.players = stmt
             .query_map([], |r| {
                 Ok(RawPlayer {
@@ -402,6 +422,8 @@ impl Store {
                     name: r.get(1)?,
                     skill: skill_from_str(&r.get::<_, String>(2)?),
                     lifetime_games: r.get(3)?,
+                    found_via: r.get(4)?,
+                    from: r.get(5)?,
                 })
             })?
             .collect::<Result<_, _>>()?;
@@ -440,12 +462,12 @@ impl Store {
         Ok(h)
     }
 
-    /// Rename or re-level a player who's no longer on the roster (roster
-    /// players are saved from the app state instead).
-    pub fn update_archived_player(&self, id: PlayerId, name: &str, skill: Skill) -> rusqlite::Result<()> {
+    /// Edit a player who's no longer on the roster (roster players are saved
+    /// from the app state instead).
+    pub fn update_archived_player(&self, p: &Player) -> rusqlite::Result<()> {
         self.conn.execute(
-            "UPDATE players SET name = ?2, skill = ?3 WHERE id = ?1 AND archived = 1",
-            params![id as i64, name, skill_to_str(skill)],
+            "UPDATE players SET name = ?2, skill = ?3, found_via = ?4, home = ?5 WHERE id = ?1 AND archived = 1",
+            params![p.id as i64, p.name, skill_to_str(p.skill), p.found_via.trim(), p.from.trim()],
         )?;
         Ok(())
     }
@@ -547,6 +569,26 @@ impl Store {
 mod tests {
     use super::*;
     use crate::engine::Target;
+
+    #[test]
+    fn old_databases_get_the_new_player_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE players (id INTEGER PRIMARY KEY, name TEXT NOT NULL, skill TEXT NOT NULL,
+                 lifetime_games INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO players(id, name, skill) VALUES (1, 'Ann', 'Advanced');",
+        )
+        .unwrap();
+        let store = Store::init(conn).unwrap();
+        let mut s = store.load().unwrap();
+        assert_eq!((s.players[&1].from.as_str(), s.players[&1].found_via.as_str()), ("", ""));
+        let ann = s.players.get_mut(&1).unwrap();
+        ann.from = "Leith ".into();
+        ann.found_via = "A friend".into();
+        store.save(&mut s).unwrap();
+        let ann = &store.load().unwrap().players[&1];
+        assert_eq!((ann.from.as_str(), ann.found_via.as_str()), ("Leith", "A friend"));
+    }
 
     #[test]
     fn round_trip_and_history() {
