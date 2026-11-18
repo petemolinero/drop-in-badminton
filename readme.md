@@ -28,9 +28,9 @@ The **History** button (clock icon) shows past game days, attendance, and games.
 The tabs in the title bar switch between three views:
 
 - **Dashboard**: the courts, Up next, the timer and the waiting list.
-- **Players**: everyone who has ever been on the roster, archived players included,
-  as a table. Edit names and skill levels in place; click a status to check
-  someone in or out, archive them, or put them back on the roster. Columns sort
+- **Players**: the player database: everyone, archived players included, as a
+  table, separate from any session. Edit names and skill levels in place; click
+  the status to archive a player or make them active again. Columns sort
   when clicked, and show sessions, games, games per session, court time, usual
   partner, and first and latest session.
 - **Analytics**: totals (players, sessions, games, average turnout, how many came

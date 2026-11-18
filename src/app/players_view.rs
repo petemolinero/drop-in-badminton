@@ -85,23 +85,21 @@ impl Col {
 pub(super) enum Filter {
     #[default]
     All,
-    Roster,
-    Here,
+    Active,
     Archived,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Status {
-    Here,
-    Roster,
+    /// On the roster, so they can be checked in to a session.
+    Active,
     Archived,
 }
 
 impl Status {
     fn label(self) -> &'static str {
         match self {
-            Status::Here => "Checked in",
-            Status::Roster => "On roster",
+            Status::Active => "Active",
             Status::Archived => "Archived",
         }
     }
@@ -138,17 +136,14 @@ impl DropInApp {
     pub(super) fn players_view(&mut self, ui: &mut Ui, pal: &Palette) {
         let stats = self.stats();
         let rows = self.player_rows(&stats);
-        let (here, roster) = (
-            rows.iter().filter(|r| r.status == Status::Here).count(),
-            rows.iter().filter(|r| r.status != Status::Archived).count(),
-        );
+        let active = rows.iter().filter(|r| r.status == Status::Active).count();
 
         // Heading and controls.
         ui.horizontal(|ui| {
             ui.label(RichText::new("Players").font(semibold(26.0)).color(pal.fg1));
             ui.add_space(8.0);
             ui.label(
-                RichText::new(format!("Everyone who's ever been on the roster · {} players", rows.len()))
+                RichText::new(format!("Every player, past and present · {} players", rows.len()))
                     .font(regular(15.0))
                     .color(pal.fg3),
             );
@@ -164,12 +159,10 @@ impl DropInApp {
                     .desired_width(280.0),
             );
             ui.add_space(12.0);
-            let archived = rows.len() - roster;
             for (filter, label, n) in [
                 (Filter::All, "All", rows.len()),
-                (Filter::Roster, "On roster", roster),
-                (Filter::Here, "Checked in", here),
-                (Filter::Archived, "Archived", archived),
+                (Filter::Active, "Active", active),
+                (Filter::Archived, "Archived", rows.len() - active),
             ] {
                 if filter_chip(ui, pal, label, n, self.players_view.filter == filter).clicked() {
                     self.players_view.filter = filter;
@@ -187,7 +180,7 @@ impl DropInApp {
             pv.added = Some(id);
             pv.focus = Some(id);
             pv.search.clear();
-            if matches!(pv.filter, Filter::Archived | Filter::Here) {
+            if pv.filter == Filter::Archived {
                 pv.filter = Filter::All;
             }
             // A blank name sorts first by name; show it at the top either way.
@@ -202,8 +195,7 @@ impl DropInApp {
             .iter()
             .filter(|r| match pv.filter {
                 Filter::All => true,
-                Filter::Roster => r.status != Status::Archived,
-                Filter::Here => r.status == Status::Here,
+                Filter::Active => r.status == Status::Active,
                 Filter::Archived => r.status == Status::Archived,
             })
             .filter(|r| query.is_empty() || r.name.to_lowercase().contains(&query) || pv.added == Some(r.id))
@@ -269,7 +261,7 @@ impl DropInApp {
                 id: p.id,
                 name: p.name.clone(),
                 skill: p.skill,
-                status: if self.state.session.present.contains_key(&p.id) { Status::Here } else { Status::Roster },
+                status: Status::Active,
                 stats: stats.players.get(&p.id).cloned().unwrap_or_default(),
             })
             .collect();
@@ -478,8 +470,7 @@ impl DropInApp {
 
     fn status_cell(&mut self, ui: &mut Ui, pal: &Palette, row: &Row, cell: Rect) {
         let (bg, fg, glyph) = match row.status {
-            Status::Here => (pal.success_subtle, pal.success_fg, icon::CHECK_CIRCLE),
-            Status::Roster => (pal.subtle_selected, pal.fg2, icon::PERSON),
+            Status::Active => (pal.success_subtle, pal.success_fg, icon::CHECK_CIRCLE),
             Status::Archived => (pal.bg2, pal.fg3, icon::ARCHIVE),
         };
         let galley = ui.painter().layout_no_wrap(row.status.label().to_owned(), semibold(13.0), fg);
@@ -504,18 +495,12 @@ impl DropInApp {
             let item = |ui: &mut Ui, glyph: &str, label: &str| ui.button(RichText::new(format!("{glyph}  {label}")).font(regular(15.0))).clicked();
             match row.status {
                 Status::Archived => {
-                    if item(ui, icon::UNDO, "Put back on the roster") {
+                    if item(ui, icon::UNDO, "Make active again") {
                         action = Some("restore");
                     }
                 }
-                Status::Roster | Status::Here => {
-                    if row.status == Status::Roster && item(ui, icon::LOGIN, "Check in") {
-                        action = Some("in");
-                    }
-                    if row.status == Status::Here && item(ui, icon::LOGOUT, "Check out") {
-                        action = Some("out");
-                    }
-                    if item(ui, icon::ARCHIVE, "Archive (off the roster)") {
+                Status::Active => {
+                    if item(ui, icon::ARCHIVE, "Archive (keeps their history)") {
                         action = Some("archive");
                     }
                 }
@@ -526,12 +511,10 @@ impl DropInApp {
         match action {
             Some("restore") => {
                 let player = Player { id, name: name.clone(), skill: row.skill, lifetime_games: row.stats.games };
-                self.act(&ctx, format!("{name} is back on the roster"), |s| {
+                self.act(&ctx, format!("{name} is active again"), |s| {
                     s.players.insert(id, player);
                 });
             }
-            Some("in") => self.act(&ctx, format!("{name} checked in"), |s| s.check_in(id, now)),
-            Some("out") => self.act(&ctx, format!("{name} checked out"), |s| s.check_out(id, now)),
             Some("archive") => self.act(&ctx, format!("{name} archived — their history is kept"), |s| s.delete_player(id, now)),
             _ => {}
         }
