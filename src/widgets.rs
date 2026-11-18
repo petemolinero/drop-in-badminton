@@ -823,12 +823,64 @@ pub fn unique(id: impl std::hash::Hash + std::fmt::Debug) -> Id {
     Id::unique(("drop-in-badminton", id))
 }
 
+/// A soft fade over the bottom of a scrolled list while there's more below,
+/// so rows ending neatly at the edge don't look like the end of the list.
+/// `corner` is the radius of the card's bottom corners the list sits in.
+pub fn fade_bottom<R>(ui: &Ui, out: &egui::scroll_area::ScrollAreaOutput<R>, bg: Color32, corner: u8) {
+    let view = out.inner_rect;
+    let below = out.content_size.y - out.state.clamped_offset().y - view.height();
+    // Fades away over the last stretch, so it's gone at the very end.
+    let t = (below / 40.0).clamp(0.0, 1.0);
+    if t <= 0.0 {
+        return;
+    }
+    let inset = if corner > 0 { 1.0 } else { 0.0 };
+    let bottom = view.bottom() - inset;
+    let (left, right) = (view.left() + inset, view.right() - inset);
+    let h = 64.0f32.min(view.height() / 3.0);
+    let solid = bottom - corner as f32;
+    let mut mesh = egui::Mesh::default();
+    const BANDS: u32 = 10;
+    for i in 0..=BANDS {
+        let f = i as f32 / BANDS as f32;
+        let y = egui::lerp((bottom - h)..=solid, f);
+        // Ease in, so the top of the fade has no visible edge.
+        let c = bg.gamma_multiply(t * f * f * (3.0 - 2.0 * f));
+        mesh.colored_vertex(pos2(left, y), c);
+        mesh.colored_vertex(pos2(right, y), c);
+        if i > 0 {
+            let k = 2 * i;
+            mesh.add_triangle(k - 2, k - 1, k);
+            mesh.add_triangle(k - 1, k + 1, k);
+        }
+    }
+    let p = ui.painter();
+    p.add(mesh);
+    if corner > 0 {
+        let r = Rect::from_min_max(pos2(left, solid), pos2(right, bottom));
+        p.rect_filled(r, CornerRadius { nw: 0, ne: 0, sw: corner - 1, se: corner - 1 }, bg.gamma_multiply(t));
+    }
+}
+
 // ===========================================================================
 // Skill colors: each level's polished finish.
 
 use egui::epaint::RectShape;
 
 static GLOSS: std::sync::OnceLock<egui::TextureHandle> = std::sync::OnceLock::new();
+static APP_ICON: std::sync::OnceLock<egui::TextureHandle> = std::sync::OnceLock::new();
+
+/// The app's own icon (the same one as the window and desktop icon), for
+/// drawing in the title bar. Mipmapped so it stays crisp drawn small.
+pub fn app_icon(ctx: &egui::Context) -> egui::TextureId {
+    APP_ICON
+        .get_or_init(|| {
+            let image = egui::ColorImage::from_rgba_unmultiplied([256, 256], include_bytes!("../assets/icon/app.rgba"));
+            let opts = egui::TextureOptions { mipmap_mode: Some(egui::TextureFilter::Linear), ..egui::TextureOptions::LINEAR };
+            ctx.load_texture("app-icon", image, opts)
+        })
+        .id()
+}
 
 /// The card finish: one soft grey-scale gradient (a bright top lip fading to
 /// a gently shaded base), tinted by each level's color when drawn.

@@ -296,12 +296,13 @@ impl DropInApp {
                 let visible = ui.available_height();
                 scroll = scroll.vertical_scroll_offset((i as f32 * ROW_H - visible / 3.0).max(0.0));
             }
-            scroll.show_rows(ui, ROW_H, order.len(), |ui, range| {
+            let out = scroll.show_rows(ui, ROW_H, order.len(), |ui, range| {
                 for i in range {
                     let row = shown[&order[i]];
                     self.player_row(ui, pal, row, i, &widths, &names);
                 }
             });
+            widgets::fade_bottom(ui, &out, pal.bg1, 8);
         });
     }
 

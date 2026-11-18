@@ -86,8 +86,17 @@ enum GameKey {
 struct Row {
     key: GameKey,
     day: Option<i64>,
+    /// As it will be saved (with any edits not yet saved).
     record: GameRecord,
+    /// Edited, but not saved yet.
+    changed: bool,
+    /// Marked for deletion, but not saved yet.
+    deleted: bool,
 }
+
+/// An edit waiting for Save changes: the game as it was, and as it will be
+/// (`None` to delete it).
+type Pending = (GameRecord, Option<GameRecord>);
 
 pub(super) struct GamesView {
     search: String,
@@ -101,6 +110,18 @@ pub(super) struct GamesView {
     editing: Option<(GameKey, Col, String)>,
     /// What's typed in the player picker's search box.
     pick_search: String,
+    /// Edits made while unlocked, saved all together (or thrown away).
+    pending: HashMap<GameKey, Pending>,
+}
+
+impl GamesView {
+    /// Leaving the view locks it again, unless there are edits not saved yet.
+    pub(super) fn leave(&mut self) {
+        if self.pending.is_empty() {
+            self.unlocked = false;
+        }
+        self.editing = None;
+    }
 }
 
 impl Default for GamesView {
@@ -114,13 +135,29 @@ impl Default for GamesView {
             log: None,
             editing: None,
             pick_search: String::new(),
+            pending: HashMap::new(),
         }
     }
 }
 
 impl DropInApp {
     pub(super) fn games_view(&mut self, ui: &mut Ui, pal: &Palette) {
-        let rows = self.game_rows();
+        let mut rows = self.game_rows();
+        // Debug builds: `DROP_IN_BADMINTON_SHOW=gamesedit` stages an edit and a deletion.
+        #[cfg(debug_assertions)]
+        if self.games_view.pending.is_empty() && rows.len() > 2 && std::env::var("DROP_IN_BADMINTON_SHOW").is_ok_and(|s| s.contains("gamesedit")) {
+            let newest = |rows: &Vec<Row>, n: usize| {
+                let mut v: Vec<usize> = (0..rows.len()).collect();
+                v.sort_by_key(|i| std::cmp::Reverse(rows[*i].record.started_ms));
+                v[n]
+            };
+            let (a, b) = (newest(&rows, 0), newest(&rows, 1));
+            let mut edited = rows[a].record.clone();
+            edited.ended_ms = edited.started_ms + 15 * 60_000;
+            self.stage(&rows[a], Some(edited));
+            self.stage(&rows[b], None);
+            rows = self.game_rows();
+        }
         let names = self.all_names();
         let sessions = rows.iter().map(|r| r.day).collect::<std::collections::HashSet<_>>().len();
 
@@ -132,7 +169,7 @@ impl DropInApp {
             ui.label(RichText::new(format!("Every game played · {games} across {sessions}")).font(regular(15.0)).color(pal.fg3));
         });
         ui.add_space(10.0);
-        let (mut export, mut lock_clicked) = (false, false);
+        let (mut export, mut lock_clicked, mut save_clicked, mut cancel_clicked) = (false, false, false, false);
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.games_view.search)
@@ -142,25 +179,46 @@ impl DropInApp {
                     .desired_width(280.0),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let unlocked = self.games_view.unlocked;
-                let (kind, glyph, label, tip) = if unlocked {
-                    (ButtonKind::Primary, icon::LOCK, "Lock editing", "Make the games read-only again")
+                if self.games_view.unlocked {
+                    let n = self.games_view.pending.len();
+                    let label = match n {
+                        0 => "Done".to_owned(),
+                        1 => "Save 1 change".to_owned(),
+                        n => format!("Save {n} changes"),
+                    };
+                    save_clicked = widgets::button(ui, pal, ButtonKind::Primary, Some(icon::LOCK), &label, 34.0)
+                        .on_hover_text("Save your edits and make the games read-only again")
+                        .clicked();
+                    cancel_clicked = widgets::button(ui, pal, ButtonKind::Secondary, None, "Cancel", 34.0)
+                        .on_hover_text("Throw away your edits and make the games read-only again")
+                        .clicked();
                 } else {
-                    (ButtonKind::Secondary, icon::LOCK_OPEN, "Unlock editing", "Correct or delete games that were logged wrongly")
-                };
-                lock_clicked = widgets::button(ui, pal, kind, Some(glyph), label, 34.0).on_hover_text(tip).clicked();
+                    lock_clicked = widgets::button(ui, pal, ButtonKind::Secondary, Some(icon::LOCK_OPEN), "Unlock editing", 34.0)
+                        .on_hover_text("Correct or delete games that were logged wrongly")
+                        .clicked();
+                }
                 export = widgets::button(ui, pal, ButtonKind::Secondary, Some(icon::EXPORT), "Export CSV", 34.0)
                     .on_hover_text("Save the games shown below as a spreadsheet")
                     .clicked();
             });
         });
         if lock_clicked {
-            if self.games_view.unlocked {
-                self.games_view.unlocked = false;
-                self.games_view.editing = None;
-            } else {
-                self.games_view.confirm_unlock = true;
+            self.games_view.confirm_unlock = true;
+        }
+        if cancel_clicked {
+            let n = self.games_view.pending.len();
+            let gv = &mut self.games_view;
+            gv.pending.clear();
+            gv.editing = None;
+            gv.unlocked = false;
+            if n > 0 {
+                let ctx = ui.ctx().clone();
+                self.toast(&ctx, if n == 1 { "Edit thrown away — nothing was changed".to_owned() } else { format!("{n} edits thrown away — nothing was changed") });
             }
+        }
+        if save_clicked {
+            let ctx = ui.ctx().clone();
+            self.save_pending(&ctx);
         }
         ui.add_space(12.0);
         if self.games_view.unlocked {
@@ -174,7 +232,7 @@ impl DropInApp {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(icon::WARNING).font(icon_font(18.0)).color(pal.warning_fg));
                         ui.label(
-                            RichText::new("Editing history. Changes are saved straight away, and changes to past sessions can't be undone.")
+                            RichText::new("Editing history. Nothing is saved until you press Save — or press Cancel to throw your edits away.")
                                 .font(regular(14.0))
                                 .color(pal.fg1),
                         );
@@ -236,11 +294,12 @@ impl DropInApp {
                 }
                 shade.push(on);
             }
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, ROW_H, shown.len(), |ui, range| {
+            let out = egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, ROW_H, shown.len(), |ui, range| {
                 for i in range {
                     self.game_row(ui, pal, shown[i], shade[i], &cols, &widths, &names);
                 }
             });
+            widgets::fade_bottom(ui, &out, pal.bg1, 8);
         });
 
         self.unlock_dialog(ui.ctx(), pal);
@@ -261,12 +320,21 @@ impl DropInApp {
             }
         };
         let today = self.state.session.day_id;
-        let mut rows: Vec<Row> = log
-            .iter()
-            .filter(|g| Some(g.day) != today)
-            .map(|g| Row { key: GameKey::Past(g.id), day: Some(g.day), record: g.record.clone() })
-            .collect();
-        rows.extend(self.state.session.games.iter().enumerate().map(|(i, g)| Row { key: GameKey::Current(i), day: today, record: g.clone() }));
+        let row = |key, day, record: &GameRecord| Row { key, day, record: record.clone(), changed: false, deleted: false };
+        let mut rows: Vec<Row> = log.iter().filter(|g| Some(g.day) != today).map(|g| row(GameKey::Past(g.id), Some(g.day), &g.record)).collect();
+        rows.extend(self.state.session.games.iter().enumerate().map(|(i, g)| row(GameKey::Current(i), today, g)));
+        // Edits not saved yet, as long as the game is still the one edited.
+        for r in &mut rows {
+            if let Some((_, after)) = self.games_view.pending.get(&r.key).filter(|(before, _)| *before == r.record) {
+                match after {
+                    Some(g) => {
+                        r.record = g.clone();
+                        r.changed = true;
+                    }
+                    None => r.deleted = true,
+                }
+            }
+        }
         rows
     }
 
@@ -326,10 +394,26 @@ impl DropInApp {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
         let hovered = ui.rect_contains_pointer(rect);
         let p = ui.painter();
-        let fill = if hovered { pal.subtle_hover } else if shaded { pal.bg2.gamma_multiply(0.5) } else { Color32::TRANSPARENT };
+        let fill = if row.deleted {
+            pal.danger_subtle.gamma_multiply(0.6)
+        } else if row.changed {
+            pal.brand_subtle.gamma_multiply(0.7)
+        } else if hovered {
+            pal.subtle_hover
+        } else if shaded {
+            pal.bg2.gamma_multiply(0.5)
+        } else {
+            Color32::TRANSPARENT
+        };
         p.rect_filled(rect, CornerRadius::ZERO, fill);
         p.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, pal.stroke2));
-        let unlocked = self.games_view.unlocked;
+        // Edited rows are marked down the left edge until saved.
+        if row.changed || row.deleted {
+            let mark = Rect::from_min_size(rect.left_top(), vec2(3.0, ROW_H));
+            p.rect_filled(mark, CornerRadius::ZERO, if row.deleted { pal.danger_fg } else { pal.brand_fg });
+        }
+        // A game marked for deletion can only be kept again, not edited.
+        let unlocked = self.games_view.unlocked && !row.deleted;
         let mut x = rect.left();
         for (&col, w) in cols.iter().zip(widths) {
             let cell = Rect::from_min_size(pos2(x, rect.top()), vec2(*w, ROW_H));
@@ -351,9 +435,14 @@ impl DropInApp {
                     } else {
                         (pos2(cell.left() + CELL_PAD, cell.center().y), Align2::LEFT_CENTER)
                     };
-                    p.text(pos, align, display(col, &row.record), regular(15.0), pal.fg1);
+                    p.text(pos, align, display(col, &row.record), regular(15.0), if row.deleted { pal.fg3 } else { pal.fg1 });
                 }
             }
+        }
+        if row.deleted {
+            // Struck through, across everything but the Keep button.
+            let end = rect.left() + widths[..widths.len() - 1].iter().sum::<f32>();
+            ui.painter().hline((rect.left() + CELL_PAD)..=(end - CELL_PAD), rect.center().y, Stroke::new(1.5, pal.danger_fg.gamma_multiply(0.7)));
         }
     }
 
@@ -403,10 +492,10 @@ impl DropInApp {
     /// Two players' names; while unlocked each is a button to swap them.
     fn team_cell(&mut self, ui: &mut Ui, pal: &Palette, row: &Row, cell: Rect, first: usize, names: &HashMap<PlayerId, String>) {
         let name = |slot: usize| row.record.players[slot].map(|id| names.get(&id).cloned().unwrap_or_else(|| "Unknown player".into()));
-        if !self.games_view.unlocked {
+        if !self.games_view.unlocked || row.deleted {
             let team: Vec<String> = (first..first + 2).filter_map(name).collect();
             let text = if team.is_empty() { "—".to_owned() } else { team.join(" & ") };
-            let ink = if team.is_empty() { pal.fg3 } else { pal.fg1 };
+            let ink = if team.is_empty() || row.deleted { pal.fg3 } else { pal.fg1 };
             let p = ui.painter().with_clip_rect(cell.shrink2(vec2(4.0, 0.0)));
             p.text(pos2(cell.left() + CELL_PAD, cell.center().y), Align2::LEFT_CENTER, text, regular(15.0), ink);
             return;
@@ -476,37 +565,101 @@ impl DropInApp {
         }
     }
 
+    /// Delete (or, once marked, keep) a game. Nothing goes until Save.
     fn remove_cell(&mut self, ui: &mut Ui, pal: &Palette, row: &Row, cell: Rect) {
         let r = Rect::from_center_size(cell.center(), Vec2::splat(30.0));
-        let resp = ui.interact(r, unique(("gv-remove", row.key)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Delete this game");
+        let (glyph, tip) = if row.deleted { (icon::UNDO, "Keep this game") } else { (icon::DELETE, "Delete this game") };
+        let resp = ui.interact(r, unique(("gv-remove", row.key)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tip);
         let p = ui.painter();
+        let hot = if row.deleted { pal.brand_fg } else { pal.danger_fg };
         if resp.hovered() {
-            p.rect_filled(r, CornerRadius::same(4), pal.danger_subtle);
+            p.rect_filled(r, CornerRadius::same(4), if row.deleted { pal.subtle_hover } else { pal.danger_subtle });
         }
-        p.text(r.center() + vec2(0.0, 1.0), Align2::CENTER_CENTER, icon::DELETE, icon_font(18.0), if resp.hovered() { pal.danger_fg } else { pal.fg3 });
-        let mut delete = false;
-        // A second click to confirm, since there's no undo.
-        egui::Popup::menu(&resp).id(unique(("gv-remove-menu", row.key))).show(|ui| {
-            ui.spacing_mut().button_padding = vec2(10.0, 7.0);
-            let label = RichText::new(format!("{}  Delete this game", icon::DELETE)).font(regular(15.0)).color(pal.danger_fg);
-            delete = ui.button(label).clicked();
-        });
-        if delete {
-            let ctx = ui.ctx().clone();
-            self.change_game(&ctx, row, None);
+        p.text(r.center() + vec2(0.0, 1.0), Align2::CENTER_CENTER, glyph, icon_font(18.0), if resp.hovered() || row.deleted { hot } else { pal.fg3 });
+        if resp.clicked() {
+            if row.deleted {
+                self.games_view.pending.remove(&row.key);
+            } else {
+                self.stage(row, None);
+            }
         }
     }
 
-    fn replace_game(&mut self, ctx: &egui::Context, row: &Row, record: GameRecord) {
-        self.change_game(ctx, row, Some(record));
+    fn replace_game(&mut self, _ctx: &egui::Context, row: &Row, record: GameRecord) {
+        self.stage(row, Some(record));
     }
 
-    /// Write a corrected game (or delete it, with `None`), keeping players'
-    /// game counts in step with who's now recorded as playing.
-    fn change_game(&mut self, ctx: &egui::Context, row: &Row, record: Option<GameRecord>) {
-        let before: Vec<PlayerId> = row.record.players.iter().flatten().copied().collect();
-        let after: Vec<PlayerId> = record.iter().flat_map(|g| g.players.iter().flatten().copied()).collect();
-        let current = matches!(row.key, GameKey::Current(_));
+    /// Note an edit (or deletion, with `None`), to be saved with the rest.
+    fn stage(&mut self, row: &Row, record: Option<GameRecord>) {
+        let pending = &mut self.games_view.pending;
+        let before = pending.get(&row.key).map_or_else(|| row.record.clone(), |(before, _)| before.clone());
+        if record.as_ref() == Some(&before) {
+            pending.remove(&row.key); // edited back to how it was
+        } else {
+            pending.insert(row.key, (before, record));
+        }
+    }
+
+    /// Write every staged edit, keeping players' game counts in step with
+    /// who's now recorded as playing, and lock the view again.
+    fn save_pending(&mut self, ctx: &egui::Context) {
+        let pending: Vec<(GameKey, Pending)> = std::mem::take(&mut self.games_view.pending).into_iter().collect();
+        self.games_view.unlocked = false;
+        self.games_view.editing = None;
+        if pending.is_empty() {
+            return;
+        }
+        let mut errors = Vec::new();
+        let mut skipped = 0;
+        let mut removed_now: Vec<usize> = Vec::new();
+        let total = pending.len();
+        for (key, (before, after)) in pending {
+            // The current session may have moved on since (an undo, say).
+            if let GameKey::Current(i) = key {
+                if self.state.session.games.get(i) != Some(&before) {
+                    skipped += 1;
+                    continue;
+                }
+            }
+            let result = match (key, &after) {
+                (GameKey::Current(i), Some(g)) => {
+                    self.state.session.games[i] = g.clone();
+                    Ok(())
+                }
+                (GameKey::Current(i), None) => {
+                    removed_now.push(i);
+                    Ok(())
+                }
+                (GameKey::Past(id), Some(g)) => self.store.update_game(id, g),
+                (GameKey::Past(id), None) => self.store.delete_game(id),
+            };
+            if let Err(err) = result {
+                errors.push(err.to_string());
+                continue;
+            }
+            self.adjust_counts(&before, after.as_ref(), matches!(key, GameKey::Current(_)));
+        }
+        // Highest first, so earlier indexes stay put.
+        removed_now.sort_unstable_by(|a, b| b.cmp(a));
+        for i in removed_now {
+            self.state.session.games.remove(i);
+        }
+        self.save();
+        self.dirty = false;
+        let saved = total - skipped - errors.len();
+        let mut text = if saved == 1 { "1 change saved".to_owned() } else { format!("{saved} changes saved") };
+        if skipped > 0 {
+            text += &format!(" · {skipped} skipped: tonight's games changed in the meantime");
+        }
+        if let Some(err) = errors.first() {
+            text += &format!(" · {} couldn't be saved: {err}", errors.len());
+        }
+        self.toast(ctx, text);
+    }
+
+    fn adjust_counts(&mut self, before: &GameRecord, after: Option<&GameRecord>, current: bool) {
+        let before: Vec<PlayerId> = before.players.iter().flatten().copied().collect();
+        let after: Vec<PlayerId> = after.iter().flat_map(|g| g.players.iter().flatten().copied()).collect();
         for id in before.iter().filter(|id| !after.contains(id)) {
             if let Some(p) = self.state.players.get_mut(id) {
                 p.lifetime_games = p.lifetime_games.saturating_sub(1);
@@ -522,31 +675,6 @@ impl DropInApp {
             if let Some(p) = self.state.session.present.get_mut(id).filter(|_| current) {
                 p.games_tonight += 1;
             }
-        }
-        let deleted = record.is_none();
-        let result = match (row.key, record) {
-            (GameKey::Current(i), Some(g)) => {
-                if let Some(slot) = self.state.session.games.get_mut(i) {
-                    *slot = g;
-                }
-                Ok(())
-            }
-            (GameKey::Current(i), None) => {
-                if i < self.state.session.games.len() {
-                    self.state.session.games.remove(i);
-                }
-                Ok(())
-            }
-            (GameKey::Past(id), Some(g)) => self.store.update_game(id, &g),
-            (GameKey::Past(id), None) => self.store.delete_game(id),
-        };
-        // Counts (and the current session) are saved with the app state.
-        self.save();
-        self.dirty = false;
-        match result {
-            Err(err) => self.toast(ctx, format!("Couldn't save the change: {err}")),
-            Ok(()) if deleted => self.toast(ctx, "Game deleted"),
-            Ok(()) => {}
         }
     }
 
@@ -566,8 +694,8 @@ impl DropInApp {
             ui.label(
                 RichText::new(
                     "These are the records of games already played. Changing or deleting them rewrites history: \
-                     players' game counts, court time, usual partners and the Analytics charts all change with them, \
-                     and changes to past sessions can't be undone.",
+                     players' game counts, court time, usual partners and the Analytics charts all change with them. \
+                     Nothing is saved until you press Save, and once saved it can't be undone.",
                 )
                 .font(regular(14.0))
                 .color(pal.fg2),

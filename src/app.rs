@@ -836,9 +836,9 @@ impl DropInApp {
         let y = rect.center().y;
 
         // App tile, name, and the game day — like an Office document title.
-        let tile = Rect::from_center_size(pos2(rect.left() + 13.0, y), Vec2::splat(26.0));
-        p.rect_filled(tile, CornerRadius::same(6), pal.brand);
-        p.text(tile.center(), Align2::CENTER_CENTER, icon::SHUTTLE_F, icon_font(17.0), pal.on_brand);
+        // The icon has a little transparent margin; draw it a touch larger to match.
+        let tile = Rect::from_center_size(pos2(rect.left() + 13.0, y), Vec2::splat(30.0));
+        p.image(widgets::app_icon(ui.ctx()), tile, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         let name = p.text(pos2(tile.right() + 10.0, y), Align2::LEFT_CENTER, "Drop-in Badminton", semibold(15.0), pal.fg1);
         p.line_segment(
             [pos2(name.right() + 12.0, y - 8.0), pos2(name.right() + 12.0, y + 8.0)],
@@ -870,7 +870,7 @@ impl DropInApp {
             if resp.clicked() && !selected {
                 self.view = view;
                 // History is only ever unlocked on purpose, one visit at a time.
-                self.games_view.unlocked = false;
+                self.games_view.leave();
                 // Fresh numbers: write out anything still waiting to be saved.
                 if self.dirty {
                     self.save();
@@ -2176,7 +2176,7 @@ impl DropInApp {
                     self.roster_row(ui, pal, player, now);
                 }
             });
-        let _ = out;
+        widgets::fade_bottom(ui, &out, pal.bg1, 0);
 
         // --- Footer ---
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
