@@ -943,35 +943,12 @@ impl DropInApp {
             }
             x = r.right() + 4.0;
         }
-        let p = ui.painter();
-        p.line_segment([pos2(x + 8.0, y - 8.0), pos2(x + 8.0, y + 8.0)], Stroke::new(1.0, pal.stroke1));
         let start = self.state.session.clock.start_ms;
-        // The session's date, when there's room before the clock on the right.
-        let label = p.layout_no_wrap(format!("Session · {}", fmt_date(start, "%A, %B %-d · %-I:%M %p")), regular(14.0), pal.fg2);
-        // Then the button for the next session (it's also in the pencil menu,
-        // for when the window is too narrow for it here).
-        const NEW_W: f32 = 150.0;
-        let room = rect.right() - 340.0;
-        let mut bx = x + 20.0;
-        if bx + label.size().x + 12.0 + NEW_W < room {
-            let w = label.size().x;
-            p.galley(pos2(bx, y - label.size().y / 2.0 - 1.0), label, pal.fg2);
-            bx += w + 12.0;
-        }
-        if bx + NEW_W < room {
-            let area = Rect::from_min_max(pos2(bx, y - 15.0), pos2(bx + NEW_W + 40.0, y + 15.0));
-            let mut bui = ui.new_child(UiBuilder::new().max_rect(area).layout(Layout::left_to_right(Align::Center)));
-            if widgets::button(&mut bui, pal, ButtonKind::Secondary, Some(icon::CALENDAR), "New session…", 30.0)
-                .on_hover_text("Put this session into History and start a new one")
-                .clicked()
-            {
-                self.session_form = Some(SessionForm::at(wall_ms(), true, false));
-            }
-        }
         let _ = now;
 
-        // Right: the session clock, which every wait and timer runs on. Laid
-        // out by hand from the right edge, everything centred on one line.
+        // Right: everything about the session, laid out by hand from the right
+        // edge on one line: its date, its clock (which every wait and timer
+        // runs on) with pause and edit, and the button for the next session.
         let clock = self.state.session.clock;
         let running = clock.running();
         let button = |ui: &mut Ui, right: f32, id: &str| {
@@ -981,6 +958,16 @@ impl DropInApp {
             ui.painter().rect_filled(r, CornerRadius::same(4), fill);
             resp
         };
+        let new_area = Rect::from_min_max(pos2(rect.right() - 200.0, y - 15.0), pos2(rect.right(), y + 15.0));
+        let mut bui = ui.new_child(UiBuilder::new().max_rect(new_area).layout(Layout::right_to_left(Align::Center)));
+        let new_btn = widgets::button(&mut bui, pal, ButtonKind::Secondary, Some(icon::CALENDAR), "New session…", 30.0)
+            .on_hover_text("Put this session into History and start a new one");
+        if new_btn.clicked() {
+            self.session_form = Some(SessionForm::at(wall_ms(), true, false));
+        }
+        let divider_x = new_btn.rect.left() - 10.0;
+        ui.painter().line_segment([pos2(divider_x, y - 8.0), pos2(divider_x, y + 8.0)], Stroke::new(1.0, pal.stroke1));
+        let rect = Rect::from_min_max(rect.min, pos2(divider_x - 6.0, rect.max.y));
         let menu_btn = button(ui, rect.right(), "session-edit").on_hover_text("Session date & time, or a new session");
         ui.painter().text(menu_btn.rect.center() + vec2(0.0, 1.0), Align2::CENTER_CENTER, icon::EDIT, icon_font(18.0), pal.fg2);
         egui::Popup::menu(&menu_btn).id(unique("session-menu")).show(|ui| {
@@ -1025,11 +1012,26 @@ impl DropInApp {
         }
         self.session_time_menu(&time_resp, pal);
         let p = ui.painter();
+        let mut left_end = time.left() - 10.0;
         if running {
-            p.text(pos2(time.left() - 10.0, y - 1.0), Align2::RIGHT_CENTER, "Session", regular(14.0), pal.fg3);
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         } else {
-            widgets::paint_badge(p, pos2(time.left() - 12.0, y), Align2::RIGHT_CENTER, Some(icon::PAUSE), "Session paused", 13.0, pal.warning_subtle, pal.warning_fg);
+            let badge = widgets::paint_badge(p, pos2(time.left() - 12.0, y), Align2::RIGHT_CENTER, Some(icon::PAUSE), "Paused", 13.0, pal.warning_subtle, pal.warning_fg);
+            left_end = badge.left() - 10.0;
+        }
+        // The session's date, when there's room after the view tabs; shorter
+        // when it's tight, and just "Session" when it's tighter still.
+        let room = left_end - (x + 24.0);
+        for text in [
+            format!("Session · {}", fmt_date(start, "%A, %B %-d · %-I:%M %p")),
+            format!("Session · {}", fmt_date(start, "%a, %b %-d · %-I:%M %p")),
+            "Session".to_owned(),
+        ] {
+            let g = p.layout_no_wrap(text, regular(14.0), pal.fg2);
+            if g.size().x <= room {
+                p.galley(pos2(left_end - g.size().x, y - g.size().y / 2.0 - 1.0), g, pal.fg2);
+                break;
+            }
         }
     }
 
