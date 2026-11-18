@@ -51,6 +51,11 @@ pub mod icon {
     pub const EDIT: &str = "\u{f3de}";
     pub const PERSON_STAR: &str = "\u{ef0d}";
     pub const DOWNLOAD: &str = "\u{f151}";
+    pub const BOARD: &str = "\u{f1e3}";
+    pub const CHART: &str = "\u{f340}";
+    pub const TABLE: &str = "\u{f75e}";
+    pub const DOWN: &str = "\u{f149}";
+    pub const ARCHIVE: &str = "\u{f13a}";
     pub const PLAY_F: &str = "\u{100000}";
     pub const PAUSE_F: &str = "\u{100001}";
     pub const NEXT_F: &str = "\u{100002}";

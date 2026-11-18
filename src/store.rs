@@ -94,6 +94,35 @@ pub struct PastGame {
     pub team_b: Vec<(String, Skill)>,
 }
 
+/// A player as stored, archived or not.
+#[derive(Clone, Debug)]
+pub struct RawPlayer {
+    pub id: PlayerId,
+    pub name: String,
+    pub skill: Skill,
+    pub lifetime_games: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct RawGame {
+    pub day: i64,
+    pub started_ms: i64,
+    pub ended_ms: i64,
+    /// (player, team 0 or 1)
+    pub players: Vec<(PlayerId, u8)>,
+}
+
+/// The whole database, flattened, for statistics.
+#[derive(Clone, Debug, Default)]
+pub struct RawHistory {
+    pub players: Vec<RawPlayer>,
+    /// (day id, started at), oldest first.
+    pub days: Vec<(i64, i64)>,
+    /// (day id, player, checked in at)
+    pub attendance: Vec<(i64, PlayerId, i64)>,
+    pub games: Vec<RawGame>,
+}
+
 fn skill_to_str(s: Skill) -> &'static str {
     s.label()
 }
@@ -275,7 +304,8 @@ impl Store {
              ON CONFLICT(id) DO UPDATE SET name = excluded.name, skill = excluded.skill,
                  lifetime_games = excluded.lifetime_games, archived = 0",
         )?;
-        for p in players.values() {
+        // A player added from the Players view is only kept once they have a name.
+        for p in players.values().filter(|p| !p.name.trim().is_empty()) {
             upsert.execute(params![p.id as i64, p.name, skill_to_str(p.skill), p.lifetime_games])?;
         }
         // Anyone no longer on the roster is archived, keeping their history.
@@ -359,6 +389,66 @@ impl Store {
     }
 
     // ----- History queries --------------------------------------------------
+
+    /// Everything the Players and Analytics views are computed from: every
+    /// player ever (archived ones too) and every session's attendance and games.
+    pub fn everything(&self) -> rusqlite::Result<RawHistory> {
+        let mut h = RawHistory::default();
+        let mut stmt = self.conn.prepare("SELECT id, name, skill, lifetime_games FROM players")?;
+        h.players = stmt
+            .query_map([], |r| {
+                Ok(RawPlayer {
+                    id: r.get::<_, i64>(0)? as PlayerId,
+                    name: r.get(1)?,
+                    skill: skill_from_str(&r.get::<_, String>(2)?),
+                    lifetime_games: r.get(3)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        let mut stmt = self.conn.prepare("SELECT id, started_at FROM game_days ORDER BY started_at")?;
+        h.days = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
+        let mut stmt = self.conn.prepare("SELECT game_day_id, player_id, checked_in_at FROM attendance")?;
+        h.attendance = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as PlayerId, r.get(2)?)))?
+            .collect::<Result<_, _>>()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT g.id, g.game_day_id, g.started_at, g.ended_at, gp.player_id, gp.team
+             FROM games g LEFT JOIN game_players gp ON gp.game_id = g.id
+             ORDER BY g.id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, Option<i64>>(4)?,
+                r.get::<_, Option<i64>>(5)?,
+            ))
+        })?;
+        let mut last = None;
+        for row in rows {
+            let (id, day, start, end, player, team) = row?;
+            if last != Some(id) {
+                h.games.push(RawGame { day, started_ms: start, ended_ms: end, players: Vec::new() });
+                last = Some(id);
+            }
+            if let (Some(p), Some(team)) = (player, team) {
+                h.games.last_mut().expect("pushed above").players.push((p as PlayerId, team as u8));
+            }
+        }
+        Ok(h)
+    }
+
+    /// Rename or re-level a player who's no longer on the roster (roster
+    /// players are saved from the app state instead).
+    pub fn update_archived_player(&self, id: PlayerId, name: &str, skill: Skill) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE players SET name = ?2, skill = ?3 WHERE id = ?1 AND archived = 1",
+            params![id as i64, name, skill_to_str(skill)],
+        )?;
+        Ok(())
+    }
 
     pub fn days(&self) -> rusqlite::Result<Vec<DaySummary>> {
         let mut stmt = self.conn.prepare(

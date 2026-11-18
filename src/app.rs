@@ -19,11 +19,26 @@ use egui::{
 
 use crate::engine::Target;
 use crate::model::*;
+use crate::stats::Stats;
 use crate::store::{DayDetail, DaySummary, Store};
 use crate::hall::{self, Hall};
 use crate::theme::{self, Palette, icon, icon_font, regular, semibold};
 use crate::update::{self, Release, Status as UpdateStatus, Updater};
 use crate::widgets::{self, ButtonKind, Help, clock, short_duration, unique};
+
+mod analytics_view;
+mod players_view;
+
+/// The app's top-level screens, picked from the title bar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum View {
+    /// Courts, Up next, the timer and the waiting list.
+    Dashboard,
+    /// Every player ever, as an editable table.
+    Players,
+    /// Headline numbers and charts across every session.
+    Analytics,
+}
 
 struct Snackbar {
     text: String,
@@ -133,6 +148,12 @@ pub struct DropInApp {
     time_edit: String,
     /// The session clock's edit box.
     session_edit: String,
+    view: View,
+    /// Bumped on every save; the Players and Analytics numbers are recomputed
+    /// from the database when it moves.
+    save_gen: u64,
+    stats: Option<(u64, std::rc::Rc<Stats>)>,
+    players_view: players_view::PlayersView,
     /// Player being renamed, the edit buffer, and whether the box still needs focus.
     renaming: Option<(PlayerId, String, bool)>,
     snackbar: Option<Snackbar>,
@@ -199,6 +220,10 @@ impl DropInApp {
             waiting_search: String::new(),
             time_edit: String::new(),
             session_edit: String::new(),
+            view: View::Dashboard,
+            save_gen: 0,
+            stats: None,
+            players_view: Default::default(),
             renaming: None,
             snackbar: None,
             confirm: None,
@@ -266,6 +291,26 @@ impl DropInApp {
         if let Err(err) = self.store.save(&mut self.state) {
             eprintln!("drop-in-badminton: failed to save: {err}");
         }
+        self.save_gen += 1;
+    }
+
+    /// Lifetime numbers for every player and session, from the database as of
+    /// the last save.
+    fn stats(&mut self) -> std::rc::Rc<Stats> {
+        if let Some((seen, stats)) = &self.stats {
+            if *seen == self.save_gen {
+                return stats.clone();
+            }
+        }
+        let stats = std::rc::Rc::new(match self.store.everything() {
+            Ok(h) => Stats::compute(&h),
+            Err(err) => {
+                eprintln!("drop-in-badminton: couldn't read history: {err}");
+                Stats::default()
+            }
+        });
+        self.stats = Some((self.save_gen, stats.clone()));
+        stats
     }
 
     /// Put the current session into History: games on court count as
@@ -437,39 +482,51 @@ impl eframe::App for DropInApp {
             .resizable(false)
             .show(ui, |ui| self.title_bar(ui, &pal, now));
 
-        Panel::top("ribbon")
-            .frame(Frame::NONE.fill(pal.canvas).inner_margin(Margin { left: g, right: g, top: 0, bottom: g }))
-            .exact_size(128.0)
-            .show_separator_line(false)
-            .resizable(false)
-            .show(ui, |ui| self.ribbon(ui, &pal, now));
-
-        Panel::right("pool")
-            .frame(Frame::NONE.fill(pal.canvas).inner_margin(Margin { left: 0, right: g, top: 0, bottom: g }))
-            .exact_size(440.0)
-            .resizable(false)
-            .show_separator_line(false)
-            .show(ui, |ui| {
-                // The roster opens in place of the waiting list, so the courts
-                // and Up next (what the TV audience reads) never change size.
-                pane(&pal).show(ui, |ui| {
-                    let avail = ui.available_size();
-                    ui.set_min_size(avail);
-                    ui.set_max_width(avail.x);
-                    self.side_tabs(ui, &pal, now);
-                    if self.roster_open {
-                        // Players dragged off a court can still be dropped here.
-                        self.drop_targets.push((ui.max_rect().expand(16.0), Target::Pool));
-                        self.roster(ui, &pal, now);
-                    } else {
-                        self.pool(ui, &pal, now);
-                    }
+        if self.view != View::Dashboard {
+            let view = self.view;
+            egui::CentralPanel::default()
+                .frame(Frame::NONE.fill(pal.canvas).inner_margin(Margin { left: g, right: g, top: 4, bottom: g }))
+                .show(ui, |ui| match view {
+                    View::Players => self.players_view(ui, &pal),
+                    _ => self.analytics_view(ui, &pal),
                 });
-            });
+        }
 
-        egui::CentralPanel::default()
-            .frame(Frame::NONE.fill(pal.canvas).inner_margin(Margin { left: g, right: g, top: 0, bottom: g }))
-            .show(ui, |ui| self.arena(ui, &pal, now));
+        if self.view == View::Dashboard {
+            Panel::top("ribbon")
+                .frame(Frame::NONE.fill(pal.canvas).inner_margin(Margin { left: g, right: g, top: 0, bottom: g }))
+                .exact_size(128.0)
+                .show_separator_line(false)
+                .resizable(false)
+                .show(ui, |ui| self.ribbon(ui, &pal, now));
+
+            Panel::right("pool")
+                .frame(Frame::NONE.fill(pal.canvas).inner_margin(Margin { left: 0, right: g, top: 0, bottom: g }))
+                .exact_size(440.0)
+                .resizable(false)
+                .show_separator_line(false)
+                .show(ui, |ui| {
+                    // The roster opens in place of the waiting list, so the courts
+                    // and Up next (what the TV audience reads) never change size.
+                    pane(&pal).show(ui, |ui| {
+                        let avail = ui.available_size();
+                        ui.set_min_size(avail);
+                        ui.set_max_width(avail.x);
+                        self.side_tabs(ui, &pal, now);
+                        if self.roster_open {
+                            // Players dragged off a court can still be dropped here.
+                            self.drop_targets.push((ui.max_rect().expand(16.0), Target::Pool));
+                            self.roster(ui, &pal, now);
+                        } else {
+                            self.pool(ui, &pal, now);
+                        }
+                    });
+                });
+
+            egui::CentralPanel::default()
+                .frame(Frame::NONE.fill(pal.canvas).inner_margin(Margin { left: g, right: g, top: 0, bottom: g }))
+                .show(ui, |ui| self.arena(ui, &pal, now));
+        }
 
         self.drag_overlay(&ctx, &pal);
         self.resolve_drop(&ctx);
@@ -571,6 +628,12 @@ impl DropInApp {
                 }));
                 self.update_open = !show.contains("ribbon");
             }
+            if show.contains("players") {
+                self.view = View::Players;
+            }
+            if show.contains("analytics") {
+                self.view = View::Analytics;
+            }
             if show.contains("sessiontime") {
                 self.session_edit = "0:30:00".into();
                 egui::Popup::open_id(ctx, unique("session-time"));
@@ -635,7 +698,7 @@ impl DropInApp {
         let t = ctx.input(|i| i.time);
         let gliding = self.anims.values().any(|a| a.t < 1.0);
         let settle = if show.contains("menu") { self.frame > 12 && !gliding } else { (self.snackbar.is_none() || t > 9.0) && !gliding };
-        let settle = settle && self.frame > 5 && self.hall.settled(t);
+        let settle = settle && self.frame > 5 && (self.view != View::Dashboard || self.hall.settled(t));
         if !self.shot_requested && t > 1.5 && settle {
             let ctx2 = ctx.clone();
             let cb = egui::ScreenshotCallback::new(move |img| {
@@ -677,11 +740,12 @@ impl DropInApp {
         if f1 {
             self.help = !self.help;
         }
-        if space {
+        let dashboard = self.view == View::Dashboard;
+        if space && dashboard {
             self.state.timer_toggle(now);
             self.dirty = true;
         }
-        if n {
+        if n && dashboard {
             self.next_round(ctx);
         }
         if f11 {
@@ -718,14 +782,46 @@ impl DropInApp {
             [pos2(name.right() + 12.0, y - 8.0), pos2(name.right() + 12.0, y + 8.0)],
             Stroke::new(1.0, pal.stroke1),
         );
+        // The three views, as tabs.
+        let mut x = name.right() + 20.0;
+        for (view, glyph, label) in [
+            (View::Dashboard, icon::BOARD, "Dashboard"),
+            (View::Players, icon::TABLE, "Players"),
+            (View::Analytics, icon::CHART, "Analytics"),
+        ] {
+            let text = ui.painter().layout_no_wrap(label.to_owned(), semibold(14.0), pal.fg1);
+            let r = Rect::from_min_size(pos2(x, y - 15.0), vec2(text.size().x + 44.0, 30.0));
+            let resp = ui.interact(r, unique(("view-tab", label)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+            let selected = self.view == view;
+            let (fill, ink) = if selected {
+                (pal.brand_subtle, pal.on_brand_subtle)
+            } else if resp.hovered() {
+                (pal.subtle_hover, pal.fg1)
+            } else {
+                (Color32::TRANSPARENT, pal.fg2)
+            };
+            let p = ui.painter();
+            p.rect_filled(r, CornerRadius::same(4), fill);
+            p.text(pos2(r.left() + 20.0, y + 1.0), Align2::CENTER_CENTER, glyph, icon_font(17.0), if selected { pal.brand_fg } else { ink });
+            p.galley_with_override_text_color(pos2(r.left() + 34.0, y - text.size().y / 2.0 - 1.0), text, ink);
+            if resp.clicked() && !selected {
+                self.view = view;
+                // Fresh numbers: write out anything still waiting to be saved.
+                if self.dirty {
+                    self.save();
+                    self.dirty = false;
+                }
+            }
+            x = r.right() + 4.0;
+        }
+        let p = ui.painter();
+        p.line_segment([pos2(x + 8.0, y - 8.0), pos2(x + 8.0, y + 8.0)], Stroke::new(1.0, pal.stroke1));
         let start = self.state.session.clock.start_ms;
-        p.text(
-            pos2(name.right() + 24.0, y),
-            Align2::LEFT_CENTER,
-            format!("Session · {}", fmt_date(start, "%A, %B %-d · %-I:%M %p")),
-            regular(14.0),
-            pal.fg2,
-        );
+        // The session's date, when there's room before the clock on the right.
+        let label = p.layout_no_wrap(format!("Session · {}", fmt_date(start, "%A, %B %-d · %-I:%M %p")), regular(14.0), pal.fg2);
+        if x + 20.0 + label.size().x < rect.right() - 340.0 {
+            p.galley(pos2(x + 20.0, y - label.size().y / 2.0 - 1.0), label, pal.fg2);
+        }
         let _ = now;
 
         // Right: the session clock, which every wait and timer runs on. Laid

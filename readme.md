@@ -25,6 +25,18 @@ fresh: everyone starts checked out, and you toggle players in as they arrive.
 If the app has been idle for 8 hours, it starts a new game day on its own.
 The **History** button (clock icon) shows past game days, attendance, and games.
 
+The tabs in the title bar switch between three views:
+
+- **Dashboard**: the courts, Up next, the timer and the waiting list.
+- **Players**: everyone who has ever been on the roster, archived players included,
+  as a table. Edit names and skill levels in place; click a status to check
+  someone in or out, archive them, or put them back on the roster. Columns sort
+  when clicked, and show sessions, games, games per session, court time, usual
+  partner, and first and latest session.
+- **Analytics**: totals (players, sessions, games, average turnout, how many came
+  back, court time), turnout per session split into returning players and
+  first-timers, the ten players with the most games, and the roster's skill mix.
+
 An older `state.json` is imported automatically on first run and renamed to
 `state.json.imported`.
 
@@ -56,7 +68,7 @@ until the next round, so they don't get placed straight back.
 
 ## Shortcuts
 
-`Space` start/pause timer · `N` next round · `F1` help · `F11` full screen · `Ctrl+Z` undo · `Esc` close panels
+`Space` start/pause timer · `N` next round (both on the Dashboard) · `F1` help · `F11` full screen · `Ctrl+Z` undo · `Esc` close panels
 
 **Right-click any player** — on a court, up next, waiting, or in the roster — to send them to waiting, give them a break, check them out, change their skill level, rename them, or delete them (with a confirmation).
 

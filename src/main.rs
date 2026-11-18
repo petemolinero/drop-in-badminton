@@ -8,6 +8,7 @@ mod engine;
 mod hall;
 mod launch;
 mod model;
+mod stats;
 mod store;
 mod surfaces;
 mod theme;
