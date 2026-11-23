@@ -35,13 +35,18 @@ fn main() {
     if launch::supervise() {
         return;
     }
+    // Debug builds: `DROP_IN_BADMINTON_SIZE=1440x900` opens unmaximized at that size (for screenshots).
+    let size = std::env::var("DROP_IN_BADMINTON_SIZE")
+        .ok()
+        .filter(|_| cfg!(debug_assertions))
+        .and_then(|s| s.split_once('x').and_then(|(w, h)| Some([w.parse::<f32>().ok()?, h.parse::<f32>().ok()?])));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Drop-in Badminton")
             .with_app_id("drop-in-badminton")
-            .with_inner_size([1600.0, 900.0])
+            .with_inner_size(size.unwrap_or([1600.0, 900.0]))
             .with_min_inner_size([1000.0, 640.0])
-            .with_maximized(true)
+            .with_maximized(size.is_none())
             .with_icon(std::sync::Arc::new(egui::IconData {
                 rgba: include_bytes!("../assets/icon/app.rgba").to_vec(),
                 width: 256,
