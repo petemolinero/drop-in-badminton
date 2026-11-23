@@ -186,6 +186,61 @@ pub fn is_locked() -> bool {
     vault_path().exists()
 }
 
+/// Earlier versions saved to the per-user folder (AppData on Windows). The first
+/// time the data folder sits next to the app, bring everything over and rename
+/// the old folder so it isn't picked up again (it stays as a safety copy).
+pub fn move_from_per_user_folder() {
+    let new = data_dir();
+    let old = crate::model::per_user_data_dir();
+    if new == old || !old.is_dir() {
+        return;
+    }
+    let has_data = |dir: &Path| dir.join(DB_FILE).exists() || dir.join(VAULT_FILE).exists();
+    if has_data(&new) || !has_data(&old) {
+        return;
+    }
+    if let Err(err) = copy_data(&old, &new) {
+        eprintln!("drop-in-badminton: could not move the data from {old:?}: {err}");
+        // Leave nothing half-copied: the old folder is still the real data.
+        for file in [DB_FILE, VAULT_FILE] {
+            let _ = std::fs::remove_file(new.join(file));
+        }
+        return;
+    }
+    let mut aside = old.as_os_str().to_owned();
+    aside.push(" (moved next to the app)");
+    if let Err(err) = std::fs::rename(&old, &aside) {
+        eprintln!("drop-in-badminton: moved the data, but could not rename {old:?}: {err}");
+    }
+}
+
+/// Copy a data folder: the database as a consistent snapshot, everything else as is.
+fn copy_data(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let (src, dst) = (entry.path(), to.join(&name));
+        let name = name.to_string_lossy();
+        if name == DB_FILE {
+            let conn = Connection::open(&src).map_err(io_error_from)?;
+            conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(io_error_from)?;
+            conn.execute("VACUUM INTO ?1", [dst.to_string_lossy()]).map_err(io_error_from)?;
+        } else if name.starts_with(DB_FILE) && (name.ends_with("-wal") || name.ends_with("-shm")) {
+            // Part of the database, already in the snapshot.
+        } else if entry.file_type()?.is_dir() {
+            copy_data(&src, &dst)?;
+        } else if !dst.exists() {
+            std::fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
+}
+
+fn io_error_from(err: rusqlite::Error) -> std::io::Error {
+    std::io::Error::other(err.to_string())
+}
+
 impl Store {
     pub fn open_default() -> rusqlite::Result<Self> {
         let path = db_path();
@@ -971,5 +1026,28 @@ mod tests {
         let reloaded = store.load().unwrap();
         assert_eq!(reloaded.players.len(), 4);
         assert!(reloaded.next_id > ids[4], "archived ids are never reused");
+    }
+
+    #[test]
+    fn copying_the_data_folder_takes_the_database_and_backups() {
+        let root = std::env::temp_dir().join(format!("dib-move-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (old, new) = (root.join("old"), root.join("new"));
+        std::fs::create_dir_all(old.join("backups")).unwrap();
+        let mut store = Store::open(&old.join(DB_FILE)).unwrap();
+        let mut state = AppState::default();
+        state.add_player("Ana", Skill::Advanced);
+        store.save(&mut state).unwrap();
+        std::fs::write(old.join("backups/before-update.db"), b"backup").unwrap();
+        std::fs::write(old.join("graphics.txt"), b"dx12").unwrap();
+
+        copy_data(&old, &new).unwrap();
+        drop(store);
+        let copied = Store::open(&new.join(DB_FILE)).unwrap().load().unwrap();
+        assert_eq!(copied.players.len(), 1);
+        assert_eq!(std::fs::read(new.join("backups/before-update.db")).unwrap(), b"backup");
+        assert!(new.join("graphics.txt").exists());
+        assert!(!new.join(format!("{DB_FILE}-wal")).exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

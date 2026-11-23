@@ -10,9 +10,14 @@ groups underneath, and the waiting queue on the right.
 cargo run --release
 ```
 
-Everything is saved automatically to a SQLite database at
-`~/.local/share/drop-in-badminton/drop-in-badminton.db` (on Windows,
-`%APPDATA%\drop-in-badminton\drop-in-badminton\data\drop-in-badminton.db`):
+Everything is saved automatically to a SQLite database in a
+`Drop-in Badminton data` folder next to the app, so copying the app's folder to
+another computer takes everything with it. (When that folder can't be written,
+or when running from cargo's `target` folder, it's saved to
+`~/.local/share/drop-in-badminton/` instead; on Windows,
+`%APPDATA%\drop-in-badminton\drop-in-badminton\data\`. Data from earlier
+versions is moved from there next to the app on first start, and the old folder
+is renamed `... (moved next to the app)`.)
 
 - **Roster**: everyone who has ever come. It carries over from week to week.
   Removing someone archives them, so their past games stay in History.
@@ -121,7 +126,8 @@ until the next round, so they don't get placed straight back.
 Download `drop-in-badminton-windows-x86_64.exe` from the
 [latest release](https://github.com/petemolinero/drop-in-badminton/releases/latest),
 put it somewhere permanent (e.g. a `Drop-in Badminton` folder in Documents) and make a
-desktop shortcut. Windows will warn once that the app is unrecognised (it isn't
+desktop shortcut. The app keeps its data in a `Drop-in Badminton data` folder beside
+it: to move to another computer, copy the whole `Drop-in Badminton` folder. Windows will warn once that the app is unrecognised (it isn't
 code-signed): click **More info → Run anyway**.
 
 After that, updates install from inside the app. It checks GitHub on start-up

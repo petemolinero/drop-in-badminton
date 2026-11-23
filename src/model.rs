@@ -472,10 +472,43 @@ impl AppState {
 // ---------------------------------------------------------------------------
 // Storage location
 
+/// Name of the data folder kept next to the app.
+pub const PORTABLE_DIR: &str = "Drop-in Badminton data";
+
+/// Where everything is saved: a `Drop-in Badminton data` folder next to the app,
+/// so copying the app's folder takes the data along. Falls back to the per-user
+/// folder when that isn't writable, and for builds run from a cargo `target`
+/// folder (development: `cargo clean` shouldn't wipe the data).
 pub fn data_dir() -> PathBuf {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| portable_dir().unwrap_or_else(per_user_data_dir)).clone()
+}
+
+/// The folder earlier versions saved to (and the fallback).
+pub fn per_user_data_dir() -> PathBuf {
     directories::ProjectDirs::from("app", "drop-in-badminton", "drop-in-badminton")
         .map(|d| d.data_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// The folder next to the app, if it can be used.
+pub fn portable_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = exe.canonicalize().unwrap_or(exe);
+    let parent = exe.parent()?;
+    let in_cargo_target = parent
+        .ancestors()
+        .any(|a| a.file_name().is_some_and(|n| n == "target") && a.parent().is_some_and(|p| p.join("Cargo.toml").exists()));
+    if in_cargo_target {
+        return None;
+    }
+    let dir = parent.join(PORTABLE_DIR);
+    std::fs::create_dir_all(&dir).ok()?;
+    // Can we actually write there (not, say, Program Files)?
+    let probe = dir.join(".write-test");
+    std::fs::write(&probe, b"").ok()?;
+    let _ = std::fs::remove_file(probe);
+    Some(dir)
 }
 
 #[cfg(test)]

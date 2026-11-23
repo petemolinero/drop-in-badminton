@@ -32,6 +32,7 @@ fn main() {
         let thread = std::thread::current().name().unwrap_or("unnamed").to_string();
         fail(&format!("crashed in thread '{thread}'{place}: {what}"));
     }));
+    store::move_from_per_user_folder();
     if launch::supervise() {
         return;
     }
