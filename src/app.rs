@@ -1794,7 +1794,7 @@ impl DropInApp {
         let waiting = self.state.waiting_list(now).iter().filter(|id| !self.state.session.present[id].resting).count();
         let tabs = [
             (SideTab::Waiting, "Waiting", Some(waiting)),
-            (SideTab::Roster, "Roster", Some(self.state.session.present.len())),
+            (SideTab::Roster, "Roster", None),
             (SideTab::AddPlayer, "Add player", None),
         ];
         let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::hover());
@@ -2272,8 +2272,8 @@ impl DropInApp {
     }
 
     fn roster(&mut self, ui: &mut Ui, pal: &Palette, now: i64) {
-        let extra = format!("{} checked in · {} players", self.state.session.present.len(), self.state.players.len());
-        ui.label(RichText::new(extra).font(regular(14.0)).color(pal.fg3));
+        let extra = format!("{} checked in · {} total players", self.state.session.present.len(), self.state.players.len());
+        ui.label(RichText::new(extra).font(regular(17.0)).color(pal.fg2));
         ui.add_space(6.0);
 
         // --- Search ---
