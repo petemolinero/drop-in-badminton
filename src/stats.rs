@@ -182,7 +182,7 @@ mod tests {
     use crate::store::{RawGame, RawPlayer};
 
     fn player(id: PlayerId, name: &str) -> RawPlayer {
-        RawPlayer { id, name: name.into(), skill: Skill::Intermediate, lifetime_games: 0, found_via: String::new(), from: String::new(), auto_check_in: false }
+        RawPlayer { id, name: name.into(), skill: Skill::Beginner2, lifetime_games: 0, found_via: String::new(), from: String::new(), auto_check_in: false }
     }
 
     #[test]

@@ -29,40 +29,46 @@ pub fn wall_ms() -> i64 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Skill {
-    Beginner,
+    // Saved under the names of the levels they replaced (v0.3 and earlier had
+    // Beginner, Intermediate, Advanced, Expert), so old files still read right.
+    #[serde(rename = "Beginner")]
+    Beginner1,
+    #[serde(rename = "Intermediate")]
+    Beginner2,
+    #[serde(rename = "Advanced")]
     Intermediate,
+    #[serde(rename = "Expert")]
     Advanced,
-    Expert,
 }
 
 impl Skill {
     pub const ALL: [Skill; 4] = [
-        Skill::Beginner,
+        Skill::Beginner1,
+        Skill::Beginner2,
         Skill::Intermediate,
         Skill::Advanced,
-        Skill::Expert,
     ];
 
     pub fn rank(self) -> i32 {
         self as i32
     }
 
-    /// Three-letter tag shown on cards and badges.
+    /// Short tag shown on cards and badges.
     pub fn short(self) -> &'static str {
         match self {
-            Skill::Beginner => "BEG",
+            Skill::Beginner1 => "B1",
+            Skill::Beginner2 => "B2",
             Skill::Intermediate => "INT",
             Skill::Advanced => "ADV",
-            Skill::Expert => "EXP",
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Skill::Beginner => "Beginner",
+            Skill::Beginner1 => "Beginner 1",
+            Skill::Beginner2 => "Beginner 2",
             Skill::Intermediate => "Intermediate",
             Skill::Advanced => "Advanced",
-            Skill::Expert => "Expert",
         }
     }
 }
@@ -418,7 +424,7 @@ impl AppState {
     }
 
     pub fn skill(&self, id: PlayerId) -> Skill {
-        self.players.get(&id).map_or(Skill::Intermediate, |p| p.skill)
+        self.players.get(&id).map_or(Skill::Beginner2, |p| p.skill)
     }
 
     /// The most players who can be linked to play together: one court's worth.

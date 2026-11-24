@@ -378,7 +378,7 @@ pub fn badge_width(h: f32) -> f32 {
 }
 
 /// The skill tag used everywhere outside the player cards: a small rounded
-/// tag in the level's finish with its short name (BEG, INT, ADV, EXP).
+/// tag in the level's finish with its short name (B1, B2, INT, ADV).
 pub fn paint_skill_badge(painter: &egui::Painter, pal: &Palette, rect: Rect, skill: Skill) {
     let radius = (rect.height() * 0.28).round() as u8;
     paint_skill_fill(painter, pal, rect, radius, skill);

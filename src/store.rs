@@ -166,7 +166,7 @@ fn skill_from_str(s: &str) -> Skill {
     Skill::ALL
         .into_iter()
         .find(|k| k.label() == s)
-        .unwrap_or(Skill::Intermediate)
+        .unwrap_or(Skill::Beginner2)
 }
 
 const DB_FILE: &str = "drop-in-badminton.db";
@@ -310,6 +310,20 @@ impl Store {
                 conn.execute_batch(ddl)?;
             }
         }
+        // v0.3.1: the levels became Beginner 1, Beginner 2, Intermediate, Advanced,
+        // with everyone moving down one name (Expert became Advanced, and so on).
+        conn.execute_batch(
+            "BEGIN;
+             UPDATE players SET skill = CASE skill
+                 WHEN 'Beginner' THEN 'Beginner 1'
+                 WHEN 'Intermediate' THEN 'Beginner 2'
+                 WHEN 'Advanced' THEN 'Intermediate'
+                 WHEN 'Expert' THEN 'Advanced'
+                 ELSE skill END
+             WHERE NOT EXISTS (SELECT 1 FROM meta WHERE key = 'skill_levels');
+             INSERT OR IGNORE INTO meta(key, value) VALUES ('skill_levels', 'beginner-1-2');
+             COMMIT;",
+        )?;
         Ok(Self { conn, vault: None, dir: None })
     }
 
@@ -918,13 +932,31 @@ mod tests {
     }
 
     #[test]
+    fn old_skill_levels_move_down_one_name_once() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE players (id INTEGER PRIMARY KEY, name TEXT NOT NULL, skill TEXT NOT NULL,
+                 lifetime_games INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO players(id, name, skill) VALUES
+                 (1, 'A', 'Beginner'), (2, 'B', 'Intermediate'), (3, 'C', 'Advanced'), (4, 'D', 'Expert');",
+        )
+        .unwrap();
+        // Opening twice must not shift anyone a second time.
+        let store = Store::init(Store::init(conn).unwrap().conn).unwrap();
+        let s = store.load().unwrap();
+        let skills: Vec<Skill> = (1..=4).map(|id| s.players[&id].skill).collect();
+        assert_eq!(skills, Skill::ALL);
+        assert_eq!(Skill::ALL.map(Skill::label), ["Beginner 1", "Beginner 2", "Intermediate", "Advanced"]);
+    }
+
+    #[test]
     fn a_password_encrypts_everything_and_can_be_changed_or_removed() {
         let dir = std::env::temp_dir().join(format!("dib-vault-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("backups")).unwrap();
         let mut store = Store::open(&dir.join(DB_FILE)).unwrap();
         let mut s = AppState::default();
-        s.add_player("Zebedee Quartermaine", Skill::Expert);
+        s.add_player("Zebedee Quartermaine", Skill::Advanced);
         store.save(&mut s).unwrap();
         store.backup_to(&dir.join("backups/old.db")).unwrap();
         let readable = |path: &Path| std::fs::read(path).is_ok_and(|b| b.windows(9).any(|w| w == b"Zebedee Q"));
@@ -934,7 +966,7 @@ mod tests {
         assert!(!dir.join(DB_FILE).exists() && !dir.join(format!("{DB_FILE}-wal")).exists(), "readable copies removed");
         assert!(!readable(&dir.join(VAULT_FILE)));
         assert!(!dir.join("backups/old.db").exists() && !readable(&dir.join("backups/old.db.enc")), "backups encrypted");
-        s.add_player("Second Person", Skill::Beginner);
+        s.add_player("Second Person", Skill::Beginner1);
         store.save(&mut s).unwrap();
         drop(store);
 
@@ -957,7 +989,7 @@ mod tests {
     fn past_games_can_be_edited_and_removed() {
         let mut store = Store::open_in_memory().unwrap();
         let mut s = AppState::default();
-        let ids: Vec<PlayerId> = ["Ann", "Bo", "Cy", "Di", "Ed"].iter().map(|n| s.add_player(n, Skill::Intermediate)).collect();
+        let ids: Vec<PlayerId> = ["Ann", "Bo", "Cy", "Di", "Ed"].iter().map(|n| s.add_player(n, Skill::Beginner2)).collect();
         s.session.clock = SessionClock::starting(1_000, 0);
         for &id in &ids {
             s.session.attendance.push(Attendance { player: id, in_ms: 1_000, out_ms: None });
@@ -987,7 +1019,7 @@ mod tests {
         let mut s = AppState::default();
         s.settings.courts = 1;
         s.sync_court_count(0);
-        let ids: Vec<_> = (0..5).map(|i| s.add_player(&format!("P{i}"), Skill::Advanced)).collect();
+        let ids: Vec<_> = (0..5).map(|i| s.add_player(&format!("P{i}"), Skill::Intermediate)).collect();
         for id in &ids {
             s.check_in(*id, 0);
         }
@@ -1036,7 +1068,7 @@ mod tests {
         std::fs::create_dir_all(old.join("backups")).unwrap();
         let mut store = Store::open(&old.join(DB_FILE)).unwrap();
         let mut state = AppState::default();
-        state.add_player("Ana", Skill::Advanced);
+        state.add_player("Ana", Skill::Intermediate);
         store.save(&mut state).unwrap();
         std::fs::write(old.join("backups/before-update.db"), b"backup").unwrap();
         std::fs::write(old.join("graphics.txt"), b"dx12").unwrap();

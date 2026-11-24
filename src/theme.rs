@@ -349,19 +349,19 @@ fn dark() -> bool {
     DARK.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Skill colors: Beginner yellow, Intermediate red, Advanced green, Expert
+/// Skill colors: Beginner 1 yellow, Beginner 2 red, Intermediate green, Advanced
 /// blue. Light theme: bright, light fills for dark text. Dark theme: deep
 /// tinted fills for light text, so the cards glow rather than glare.
 pub fn chip_color(skill: Skill) -> Color32 {
     match (skill, dark()) {
-        (Skill::Beginner, false) => hex(0xFFDF5E),
-        (Skill::Intermediate, false) => hex(0xFF9A94),
-        (Skill::Advanced, false) => hex(0x86DC8E),
-        (Skill::Expert, false) => hex(0x8EC3FF),
-        (Skill::Beginner, true) => hex(0xC9A227),
-        (Skill::Intermediate, true) => hex(0x9A2A2A),
-        (Skill::Advanced, true) => hex(0x1E6B2C),
-        (Skill::Expert, true) => hex(0x1F5AA6),
+        (Skill::Beginner1, false) => hex(0xFFDF5E),
+        (Skill::Beginner2, false) => hex(0xFF9A94),
+        (Skill::Intermediate, false) => hex(0x86DC8E),
+        (Skill::Advanced, false) => hex(0x8EC3FF),
+        (Skill::Beginner1, true) => hex(0xC9A227),
+        (Skill::Beginner2, true) => hex(0x9A2A2A),
+        (Skill::Intermediate, true) => hex(0x1E6B2C),
+        (Skill::Advanced, true) => hex(0x1F5AA6),
     }
 }
 
@@ -374,10 +374,10 @@ pub fn skill_tones(skill: Skill) -> [Color32; 3] {
 /// A strong version of each level's color, for dots and small marks.
 pub fn skill_color(skill: Skill) -> Color32 {
     match skill {
-        Skill::Beginner => hex(0xD9A800),
-        Skill::Intermediate => hex(0xD13438),
-        Skill::Advanced => hex(0x1E9E3A),
-        Skill::Expert => hex(0x1C6FD6),
+        Skill::Beginner1 => hex(0xD9A800),
+        Skill::Beginner2 => hex(0xD13438),
+        Skill::Intermediate => hex(0x1E9E3A),
+        Skill::Advanced => hex(0x1C6FD6),
     }
 }
 
@@ -385,17 +385,17 @@ pub fn skill_color(skill: Skill) -> Color32 {
 pub fn on_skill_color(skill: Skill) -> Color32 {
     if dark() {
         return match skill {
-            Skill::Beginner => hex(0x2A1F00),
-            Skill::Intermediate => hex(0xFFE5E3),
-            Skill::Advanced => hex(0xE3FAE6),
-            Skill::Expert => hex(0xE3EFFF),
+            Skill::Beginner1 => hex(0x2A1F00),
+            Skill::Beginner2 => hex(0xFFE5E3),
+            Skill::Intermediate => hex(0xE3FAE6),
+            Skill::Advanced => hex(0xE3EFFF),
         };
     }
     match skill {
-        Skill::Beginner => hex(0x3D2E00),
-        Skill::Intermediate => hex(0x4A0D0D),
-        Skill::Advanced => hex(0x0A3314),
-        Skill::Expert => hex(0x0A2148),
+        Skill::Beginner1 => hex(0x3D2E00),
+        Skill::Beginner2 => hex(0x4A0D0D),
+        Skill::Intermediate => hex(0x0A3314),
+        Skill::Advanced => hex(0x0A2148),
     }
 }
 

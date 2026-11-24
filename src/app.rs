@@ -245,7 +245,7 @@ impl DropInApp {
             settings_open: false,
             help: false,
             new_name: String::new(),
-            new_skill: Skill::Intermediate,
+            new_skill: Skill::Beginner2,
             new_from: String::new(),
             new_found_via: String::new(),
             new_auto: false,
@@ -3153,7 +3153,7 @@ fn help_roster() -> Help {
         "Checking people in",
         &[
             "Flip someone's switch on when they arrive — their wait clock starts. Flip it off when they leave.",
-            "The colored tag (BEG, INT, ADV, EXP) is their skill level; click it to change it.",
+            "The colored tag (B1, B2, INT, ADV) is their skill level; click it to change it.",
             "Double-click a name to fix its spelling. Right-click for more, including delete.",
             "New game day saves today to History and checks everyone out. It also happens by itself after 8 quiet hours.",
         ],

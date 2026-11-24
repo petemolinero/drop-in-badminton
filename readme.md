@@ -104,8 +104,8 @@ until the next round, so they don't get placed straight back.
   a court (or checked in). Waits within the same minute are broken by fewest games tonight.
 - Up next always takes the **next players in line**: 4 for one open court, 8 for
   two, and so on. Skill never lets anyone jump the queue; it only arranges the
-  chosen players: similar levels share a court (Beginner = yellow, Intermediate =
-  red, Advanced = green, Expert = blue), and teams are balanced: strongest +
+  chosen players: similar levels share a court (Beginner 1 = yellow, Beginner 2 =
+  red, Intermediate = green, Advanced = blue), and teams are balanced: strongest +
   weakest vs. the middle two.
 - Linked players share a place in line and a wait (bracketed together in the
   waiting list). If the cut-off would split them, they wait for the next round

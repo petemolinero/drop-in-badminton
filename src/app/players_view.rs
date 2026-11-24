@@ -225,7 +225,7 @@ impl DropInApp {
         });
         ui.add_space(12.0);
         if add {
-            let id = self.state.add_player("", Skill::Intermediate);
+            let id = self.state.add_player("", Skill::Beginner2);
             self.dirty = true;
             let pv = &mut self.players_view;
             pv.added = Some(id);
@@ -337,7 +337,7 @@ impl DropInApp {
                     _ => Player {
                         id: *id,
                         name: s.name.clone(),
-                        skill: s.skill.unwrap_or(Skill::Intermediate),
+                        skill: s.skill.unwrap_or(Skill::Beginner2),
                         lifetime_games: s.games,
                         found_via: s.found_via.clone(),
                         from: s.from.clone(),

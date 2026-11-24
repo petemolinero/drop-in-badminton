@@ -892,7 +892,7 @@ mod tests {
 
     #[test]
     fn deck_autofills_in_arrival_order() {
-        let (s, ids) = setup(&[Skill::Intermediate; 14], 3);
+        let (s, ids) = setup(&[Skill::Beginner2; 14], 3);
         let deck: Vec<_> = s.session.deck.iter().flatten().flatten().copied().collect();
         assert_eq!(deck.len(), 12);
         // The last two arrivals are waiting.
@@ -901,7 +901,7 @@ mod tests {
 
     #[test]
     fn rotation_moves_deck_to_courts_and_refills() {
-        let (mut s, _) = setup(&[Skill::Intermediate; 20], 3);
+        let (mut s, _) = setup(&[Skill::Beginner2; 20], 3);
         assert!(s.next_round(MIN));
         assert_eq!(s.session.courts.iter().flatten().flatten().count(), 12);
         assert_eq!(s.session.deck.iter().flatten().flatten().count(), 8);
@@ -915,7 +915,7 @@ mod tests {
     fn short_handed_courts_take_turns() {
         // 20 players, 3 courts: one court must keep playing each round, but it
         // should never be the same court twice in a row.
-        let (mut s, _) = setup(&[Skill::Intermediate; 20], 3);
+        let (mut s, _) = setup(&[Skill::Beginner2; 20], 3);
         s.next_round(MIN); // everyone from deck onto courts, 8 now on deck
         let mut kept = Vec::new();
         for round in 2..8 {
@@ -932,7 +932,7 @@ mod tests {
 
     #[test]
     fn longest_waiting_go_first() {
-        let (mut s, ids) = setup(&[Skill::Intermediate; 8], 1);
+        let (mut s, ids) = setup(&[Skill::Beginner2; 8], 1);
         s.next_round(MIN); // P0..P3 on court, P4..P7 on deck
         s.next_round(16 * MIN); // P4..P7 on court, P0..P3 come off and go on deck
         let deck: Vec<_> = s.session.deck[0].iter().flatten().copied().collect();
@@ -945,7 +945,7 @@ mod tests {
     fn similar_levels_share_a_court() {
         use Skill::*;
         // The next eight in line alternate levels; arranged, each court is even.
-        let (s, _) = setup(&[Beginner, Expert, Beginner, Expert, Beginner, Expert, Beginner, Expert], 2);
+        let (s, _) = setup(&[Beginner1, Advanced, Beginner1, Advanced, Beginner1, Advanced, Beginner1, Advanced], 2);
         for g in &s.session.deck {
             let skills: Vec<Skill> = g.iter().flatten().map(|id| s.skill(*id)).collect();
             assert!(skills.iter().all(|k| *k == skills[0]), "mixed group: {skills:?}");
@@ -961,8 +961,8 @@ mod tests {
         let now = 60 * MIN;
         // Four have waited longest; a beginner who arrived later is a closer
         // match for three of them but isn't next, so doesn't play.
-        let first: Vec<_> = [Beginner, Expert, Beginner, Beginner].iter().enumerate().map(|(i, k)| s.add_player(&format!("W{i}"), *k)).collect();
-        let late = s.add_player("Late", Beginner);
+        let first: Vec<_> = [Beginner1, Advanced, Beginner1, Beginner1].iter().enumerate().map(|(i, k)| s.add_player(&format!("W{i}"), *k)).collect();
+        let late = s.add_player("Late", Beginner1);
         for (i, id) in first.iter().enumerate() {
             s.session.present.insert(*id, Presence::new(now - (30 - i as i64) * MIN));
         }
@@ -978,7 +978,7 @@ mod tests {
         let mut s = AppState::default();
         s.settings.courts = 1;
         s.sync_court_count(0);
-        let ids: Vec<_> = (0..6).map(|i| s.add_player(&format!("P{i}"), Skill::Intermediate)).collect();
+        let ids: Vec<_> = (0..6).map(|i| s.add_player(&format!("P{i}"), Skill::Beginner2)).collect();
         for (i, id) in ids.iter().enumerate() {
             s.session.present.insert(*id, Presence::new(i as i64 * MIN));
         }
@@ -998,7 +998,7 @@ mod tests {
 
     #[test]
     fn dragging_off_deck_does_not_bounce_back() {
-        let (mut s, _) = setup(&[Skill::Intermediate; 6], 1);
+        let (mut s, _) = setup(&[Skill::Beginner2; 6], 1);
         let first = s.session.deck[0][0].unwrap();
         s.move_player(first, Target::Pool, 2 * MIN);
         assert!(!s.session.deck[0].contains(&Some(first)));
@@ -1010,7 +1010,7 @@ mod tests {
 
     #[test]
     fn swap_between_court_and_deck() {
-        let (mut s, _) = setup(&[Skill::Intermediate; 8], 1);
+        let (mut s, _) = setup(&[Skill::Beginner2; 8], 1);
         s.next_round(MIN);
         let on = s.session.courts[0][0].unwrap();
         let dk = s.session.deck[0][2].unwrap();
@@ -1025,7 +1025,7 @@ mod tests {
 
     #[test]
     fn only_next_round_resets_a_wait() {
-        let (mut s, _) = setup(&[Skill::Intermediate; 8], 1);
+        let (mut s, _) = setup(&[Skill::Beginner2; 8], 1);
         let round = s.settings.round_ms();
         s.next_round(MIN);
         s.next_round(MIN + round); // second group on; first group came off at MIN + round
@@ -1056,7 +1056,7 @@ mod tests {
 
     #[test]
     fn incomplete_deck_group_is_topped_up_on_rotation() {
-        let (mut s, _) = setup(&[Skill::Intermediate; 6], 1);
+        let (mut s, _) = setup(&[Skill::Beginner2; 6], 1);
         s.next_round(MIN); // 4 on court, 2 on deck
         assert_eq!(s.session.deck[0].iter().flatten().count(), 2);
         s.next_round(16 * MIN);
@@ -1065,9 +1065,9 @@ mod tests {
 
     #[test]
     fn history_records_attendance_and_games() {
-        let (mut s, ids) = setup(&[Skill::Intermediate; 5], 1);
+        let (mut s, ids) = setup(&[Skill::Beginner2; 5], 1);
         // `setup` bypasses check-in; check one more player in properly.
-        let late = s.add_player("Late", Skill::Expert);
+        let late = s.add_player("Late", Skill::Advanced);
         s.check_in(late, MIN);
         assert_eq!(s.session.attendance.len(), 1);
         s.next_round(2 * MIN); // first game starts
@@ -1101,7 +1101,7 @@ mod tests {
     #[test]
     fn linked_players_share_a_court() {
         // P0 arrived first and P9 last; linked, they still go on together.
-        let (mut s, ids) = setup(&[Skill::Intermediate; 10], 2);
+        let (mut s, ids) = setup(&[Skill::Beginner2; 10], 2);
         s.link_players(ids[0], &[ids[9]], 20_000);
         assert!(group_of(&s, ids[0]).is_some());
         assert_eq!(group_of(&s, ids[0]), group_of(&s, ids[9]));
@@ -1119,7 +1119,7 @@ mod tests {
 
     #[test]
     fn linked_trio_never_starves() {
-        let (mut s, ids) = setup(&[Skill::Intermediate; 11], 2);
+        let (mut s, ids) = setup(&[Skill::Beginner2; 11], 2);
         s.set_partners(ids[8], &[ids[9], ids[10]]);
         let mut played = 0;
         for round in 1..10 {
@@ -1171,7 +1171,7 @@ mod tests {
 
     #[test]
     fn waiting_list_shows_the_real_picking_order() {
-        let (mut s, ids) = setup(&[Skill::Intermediate; 10], 1);
+        let (mut s, ids) = setup(&[Skill::Beginner2; 10], 1);
         // P0–P3 are up next. Next in line: P4, P5, P6, then P7 and P8 linked —
         // but only one place is left for them, so they wait and P9 goes first.
         s.link_players(ids[7], &[ids[8]], 20_000);
@@ -1185,7 +1185,7 @@ mod tests {
 
     #[test]
     fn no_show_taken_off_court_keeps_their_wait() {
-        let (mut s, _) = setup(&[Skill::Intermediate; 14], 2);
+        let (mut s, _) = setup(&[Skill::Beginner2; 14], 2);
         for r in 1..=3 {
             s.next_round(r * 15 * MIN);
         }
@@ -1204,7 +1204,7 @@ mod tests {
 
     #[test]
     fn time_up_ends_the_games_and_next_round_does_not_again() {
-        let (mut s, ids) = setup(&[Skill::Intermediate; 10], 2);
+        let (mut s, ids) = setup(&[Skill::Beginner2; 10], 2);
         s.settings.auto_start_timer = true;
         let round = s.settings.round_ms();
         s.next_round(MIN);

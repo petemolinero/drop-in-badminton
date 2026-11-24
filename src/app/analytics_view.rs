@@ -173,7 +173,7 @@ impl DropInApp {
             .most_games(10)
             .into_iter()
             .map(|(id, s)| {
-                let skill = self.state.players.get(&id).map(|p| p.skill).or(s.skill).unwrap_or(Skill::Intermediate);
+                let skill = self.state.players.get(&id).map(|p| p.skill).or(s.skill).unwrap_or(Skill::Beginner2);
                 let name = self.state.players.get(&id).map_or_else(|| s.name.clone(), |p| p.name.clone());
                 (name, skill, s.games, s.sessions)
             })
